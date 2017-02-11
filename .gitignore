@@ -37,6 +37,7 @@ netdata-coverity-analysis.tgz
 
 .cproject
 .idea/
+.vscode/
 .project
 README
 TODO.md
@@ -83,6 +84,8 @@ CMakeFiles/
 cmake_install.cmake
 
 .jetbrains*
+
+.DS_Store
 
 contrib/debian/changelog
 profile/benchmark-dictionary

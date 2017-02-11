@@ -4,7 +4,7 @@
 AC_PREREQ(2.60)
 
 define([VERSION_MAJOR], [1])
-define([VERSION_MINOR], [4])
+define([VERSION_MINOR], [5])
 define([VERSION_FIX], [1])
 define([VERSION_NUMBER], VERSION_MAJOR[.]VERSION_MINOR[.]VERSION_FIX)
 define([VERSION_SUFFIX], [_master])
@@ -24,6 +24,15 @@ PACKAGE_RPM_VERSION="VERSION_NUMBER"
 AC_SUBST([PACKAGE_RPM_VERSION])
 AC_SUBST([PACKAGE_RPM_RELEASE])
 
+# fails on centos6
+#AX_CHECK_ENABLE_DEBUG()
+
+AX_GCC_FUNC_ATTRIBUTE(returns_nonnull)
+AX_GCC_FUNC_ATTRIBUTE(malloc)
+AX_GCC_FUNC_ATTRIBUTE(noreturn)
+AX_GCC_FUNC_ATTRIBUTE(format)
+AX_GCC_FUNC_ATTRIBUTE(warn_unused_result)
+
 AC_CONFIG_AUX_DIR([.])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
@@ -38,17 +47,25 @@ AC_CHECK_FUNCS_ONCE(accept4)
 AC_CHECK_TYPES([struct timespec, clockid_t], [], [], [[#include <time.h>]])
 AC_SEARCH_LIBS([clock_gettime], [rt posix4])
 AC_CHECK_FUNCS([clock_gettime])
+AC_CHECK_FUNCS([sched_setscheduler sched_get_priority_min sched_get_priority_max nice])
 
 # Check system type
 case "$host_os" in
 freebsd*)
 	build_target=freebsd
 	;;
+darwin*)
+	build_target=macos
+	LDFLAGS="${LDFLAGS} -framework CoreFoundation -framework IOKit"
+	;;
 *)
+	build_target=linux
 	;;
 esac
 
 AM_CONDITIONAL([FREEBSD], [test x$build_target = xfreebsd])
+AM_CONDITIONAL([MACOS], [test x$build_target = xmacos])
+AM_CONDITIONAL([LINUX], [test x$build_target = xlinux])
 
 AC_ARG_ENABLE(
 	[plugin-nfacct],
@@ -111,15 +128,35 @@ else
 	fi
 fi
 
+AC_TYPE_INT8_T
+AC_TYPE_INT16_T
+AC_TYPE_INT32_T
+AC_TYPE_INT64_T
 AC_TYPE_UINT8_T
 AC_TYPE_UINT16_T
 AC_TYPE_UINT32_T
+AC_TYPE_UINT64_T
 AC_C_INLINE
 AC_FUNC_STRERROR_R
 AC_C__GENERIC
 AC_C___ATOMIC
+# AC_C_STMT_EXPR
 AC_CHECK_SIZEOF([void *])
 AC_CANONICAL_HOST
+AC_HEADER_MAJOR
+AC_HEADER_RESOLV
+AC_CHECK_HEADERS_ONCE([sys/prctl.h])
+
+AC_CHECK_LIB([cap], [cap_get_proc, cap_set_proc],
+	[AC_CHECK_HEADER(
+		[sys/capability.h],
+		[
+			CAP_LIBS=-lcap
+ 			AC_DEFINE([HAVE_CAPABILITY], [1], [libcap usability])
+ 		]
+	)]
+)
+OPTIONAL_CAP_LIBS="${CAP_LIBS}"
 
 AC_ARG_VAR([SSE_CANDIDATE], [C compiler flags for SSE])
 AS_CASE([$host_cpu],
@@ -216,6 +253,7 @@ AC_SUBST([OPTIONAL_ZLIB_CLFAGS])
 AC_SUBST([OPTIONAL_ZLIB_LIBS])
 AC_SUBST([OPTIONAL_UUID_CLFAGS])
 AC_SUBST([OPTIONAL_UUID_LIBS])
+AC_SUBST([OPTIONAL_CAP_LIBS])
 
 AC_CONFIG_FILES([
 	Makefile

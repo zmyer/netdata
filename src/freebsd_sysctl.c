@@ -15,9 +15,35 @@
 // NEEDED BY: struct sysctl_netisr_workstream, struct sysctl_netisr_work
 #include <net/netisr.h>
 // NEEDED BY: struct ifaddrs, getifaddrs()
-#define _IFI_OQDROPS // It is for FreeNAS only. Most probably in future releases of FreeNAS it will be removed
 #include <net/if.h>
 #include <ifaddrs.h>
+// NEEDED BY do_tcp...
+#include <netinet/tcp_var.h>
+#include <netinet/tcp_fsm.h>
+// NEEDED BY do_udp..., do_ip...
+#include <netinet/ip_var.h>
+// NEEDED BY do_udp...
+#include <netinet/udp.h>
+#include <netinet/udp_var.h>
+// NEEDED BY do_icmp...
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
+#include <netinet/icmp_var.h>
+// NEEDED BY do_ip6...
+#include <netinet6/ip6_var.h>
+// NEEDED BY do_icmp6...
+#include <netinet/icmp6.h>
+// NEEDED BY do_space, do_inodes
+#include <sys/mount.h>
+// NEEDED BY do_uptime
+#include <time.h>
+
+#define KILO_FACTOR 1024
+#define MEGA_FACTOR 1048576     // 1024 * 1024
+#define GIGA_FACTOR 1073741824  // 1024 * 1024 * 1024
+
+#define MAX_INT_DIGITS 10 // maximum number of digits for int
+
 // NEEDED BY: do_disk_io
 #define RRD_TYPE_DISK "disk"
 
@@ -28,12 +54,17 @@
 #define IFA_DATA(s) (((struct if_data *)ifa->ifa_data)->ifi_ ## s)
 
 int do_freebsd_sysctl(int update_every, usec_t dt) {
-    (void)dt;
-
     static int do_cpu = -1, do_cpu_cores = -1, do_interrupts = -1, do_context = -1, do_forks = -1, do_processes = -1,
         do_loadavg = -1, do_all_processes = -1, do_disk_io = -1, do_swap = -1, do_ram = -1, do_swapio = -1,
         do_pgfaults = -1, do_committed = -1, do_ipc_semaphores = -1, do_ipc_shared_mem = -1, do_ipc_msg_queues = -1,
-        do_dev_intr = -1, do_soft_intr = -1, do_netisr = -1, do_netisr_per_core = -1, do_bandwidth = -1;
+        do_dev_intr = -1, do_soft_intr = -1, do_netisr = -1, do_netisr_per_core = -1, do_bandwidth = -1,
+        do_tcp_sockets = -1, do_tcp_packets = -1, do_tcp_errors = -1, do_tcp_handshake = -1,
+        do_ecn = -1, do_tcpext_syscookies = -1, do_tcpext_ofo = -1, do_tcpext_connaborts = -1,
+        do_udp_packets = -1, do_udp_errors = -1, do_icmp_packets = -1, do_icmpmsg = -1,
+        do_ip_packets = -1, do_ip_fragsout = -1, do_ip_fragsin = -1, do_ip_errors = -1,
+        do_ip6_packets = -1, do_ip6_fragsout = -1, do_ip6_fragsin = -1, do_ip6_errors = -1,
+        do_icmp6 = -1, do_icmp6_redir = -1, do_icmp6_errors = -1, do_icmp6_echos = -1, do_icmp6_router = -1,
+        do_icmp6_neighbor = -1, do_icmp6_types = -1, do_space = -1, do_inodes = -1, do_uptime = -1;
 
     if (unlikely(do_cpu == -1)) {
         do_cpu                  = config_get_boolean("plugin:freebsd:sysctl", "cpu utilization", 1);
@@ -58,17 +89,50 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
         do_netisr               = config_get_boolean("plugin:freebsd:sysctl", "netisr", 1);
         do_netisr_per_core      = config_get_boolean("plugin:freebsd:sysctl", "netisr per core", 1);
         do_bandwidth            = config_get_boolean("plugin:freebsd:sysctl", "bandwidth", 1);
+        do_tcp_sockets          = config_get_boolean("plugin:freebsd:sysctl", "ipv4 TCP connections", 1);
+        do_tcp_packets          = config_get_boolean("plugin:freebsd:sysctl", "ipv4 TCP packets", 1);
+        do_tcp_errors           = config_get_boolean("plugin:freebsd:sysctl", "ipv4 TCP errors", 1);
+        do_tcp_handshake        = config_get_boolean("plugin:freebsd:sysctl", "ipv4 TCP handshake issues", 1);
+        do_ecn                  = config_get_boolean_ondemand("plugin:freebsd:sysctl", "ECN packets", CONFIG_ONDEMAND_ONDEMAND);
+        do_tcpext_syscookies    = config_get_boolean_ondemand("plugin:freebsd:sysctl", "TCP SYN cookies", CONFIG_ONDEMAND_ONDEMAND);
+        do_tcpext_ofo           = config_get_boolean_ondemand("plugin:freebsd:sysctl", "TCP out-of-order queue", CONFIG_ONDEMAND_ONDEMAND);
+        do_tcpext_connaborts    = config_get_boolean_ondemand("plugin:freebsd:sysctl", "TCP connection aborts", CONFIG_ONDEMAND_ONDEMAND);
+        do_udp_packets          = config_get_boolean("plugin:freebsd:sysctl", "ipv4 UDP packets", 1);
+        do_udp_errors           = config_get_boolean("plugin:freebsd:sysctl", "ipv4 UDP errors", 1);
+        do_icmp_packets         = config_get_boolean("plugin:freebsd:sysctl", "ipv4 ICMP packets", 1);
+        do_icmpmsg              = config_get_boolean("plugin:freebsd:sysctl", "ipv4 ICMP messages", 1);
+        do_ip_packets           = config_get_boolean("plugin:freebsd:sysctl", "ipv4 packets", 1);
+        do_ip_fragsout          = config_get_boolean("plugin:freebsd:sysctl", "ipv4 fragments sent", 1);
+        do_ip_fragsin           = config_get_boolean("plugin:freebsd:sysctl", "ipv4 fragments assembly", 1);
+        do_ip_errors            = config_get_boolean("plugin:freebsd:sysctl", "ipv4 errors", 1);
+        do_ip6_packets          = config_get_boolean_ondemand("plugin:freebsd:sysctl", "ipv6 packets", CONFIG_ONDEMAND_ONDEMAND);
+        do_ip6_fragsout         = config_get_boolean_ondemand("plugin:freebsd:sysctl", "ipv6 fragments sent", CONFIG_ONDEMAND_ONDEMAND);
+        do_ip6_fragsin          = config_get_boolean_ondemand("plugin:freebsd:sysctl", "ipv6 fragments assembly", CONFIG_ONDEMAND_ONDEMAND);
+        do_ip6_errors           = config_get_boolean_ondemand("plugin:freebsd:sysctl", "ipv6 errors", CONFIG_ONDEMAND_ONDEMAND);
+        do_icmp6                = config_get_boolean_ondemand("plugin:freebsd:sysctl", "icmp", CONFIG_ONDEMAND_ONDEMAND);
+        do_icmp6_redir          = config_get_boolean_ondemand("plugin:freebsd:sysctl", "icmp redirects", CONFIG_ONDEMAND_ONDEMAND);
+        do_icmp6_errors         = config_get_boolean_ondemand("plugin:freebsd:sysctl", "icmp errors", CONFIG_ONDEMAND_ONDEMAND);
+        do_icmp6_echos          = config_get_boolean_ondemand("plugin:freebsd:sysctl", "icmp echos", CONFIG_ONDEMAND_ONDEMAND);
+        do_icmp6_router         = config_get_boolean_ondemand("plugin:freebsd:sysctl", "icmp router", CONFIG_ONDEMAND_ONDEMAND);
+        do_icmp6_neighbor       = config_get_boolean_ondemand("plugin:freebsd:sysctl", "icmp neighbor", CONFIG_ONDEMAND_ONDEMAND);
+        do_icmp6_types          = config_get_boolean_ondemand("plugin:freebsd:sysctl", "icmp types", CONFIG_ONDEMAND_ONDEMAND);
+        do_space                = config_get_boolean("plugin:freebsd:sysctl", "space usage for all disks", 1);
+        do_inodes               = config_get_boolean("plugin:freebsd:sysctl", "inodes usage for all disks", 1);
+        do_uptime               = config_get_boolean("plugin:freebsd:sysctl", "system uptime", 1);
     }
 
     RRDSET *st;
+    RRDDIM *rd;
 
     int system_pagesize = getpagesize(); // wouldn't it be better to get value directly from hw.pagesize?
     int i, n;
+    void *p;
     int common_error = 0;
     size_t size;
+    char title[4096 + 1];
 
     // NEEDED BY: do_loadavg
-    static usec_t last_loadavg_usec = 0;
+    static usec_t next_loadavg_dt = 0;
     struct loadavg sysload;
 
     // NEEDED BY: do_cpu, do_cpu_cores
@@ -79,7 +143,7 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
 
     // NEEDED BY: do_cpu_cores
     static long *pcpu_cp_time = NULL;
-    char cpuid[8]; // no more than 4 digits expected
+    char cpuid[MAX_INT_DIGITS + 1];
 
     // NEEDED BY: do_all_processes, do_processes
     struct vmtotal vmtotal_data;
@@ -91,6 +155,7 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
     size_t intrcnt_size;
     unsigned long nintr = 0;
     static unsigned long *intrcnt = NULL;
+    static char *intrnames = NULL;
     unsigned long long totalintr = 0;
 
     // NEEDED BY: do_disk_io
@@ -98,6 +163,7 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
     int numdevs;
     static void *devstat_data = NULL;
     struct devstat *dstat;
+    char disk[DEVSTAT_NAME_LEN + MAX_INT_DIGITS + 1];
     struct cur_dstat {
         collected_number duration_read_ms;
         collected_number duration_write_ms;
@@ -175,9 +241,44 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
         u_long  ift_obytes;
     } iftot = {0, 0};
 
+    // NEEDED BY: do_tcp...
+    struct tcpstat tcpstat;
+    uint64_t tcps_states[TCP_NSTATES];
+
+    // NEEDED BY: do_udp...
+    struct udpstat udpstat;
+
+    // NEEDED BY: do_icmp...
+    struct icmpstat icmpstat;
+    struct icmp_total {
+        u_long  msgs_in;
+        u_long  msgs_out;
+    } icmp_total = {0, 0};
+
+    // NEEDED BY: do_ip...
+    struct ipstat ipstat;
+
+    // NEEDED BY: do_ip6...
+    struct ip6stat ip6stat;
+
+    // NEEDED BY: do_icmp6...
+    struct icmp6stat icmp6stat;
+    struct icmp6_total {
+        u_long  msgs_in;
+        u_long  msgs_out;
+    } icmp6_total = {0, 0};
+
+    // NEEDED BY: do_space, do_inodes
+    struct statfs *mntbuf;
+    int mntsize;
+    char mntonname[MNAMELEN + 1];
+
+    // NEEDED BY: do_uptime
+    struct timespec boot_time, cur_time;
+
     // --------------------------------------------------------------------
 
-    if (last_loadavg_usec <= dt) {
+    if (next_loadavg_dt <= dt) {
         if (likely(do_loadavg)) {
             if (unlikely(GETSYSCTL("vm.loadavg", sysload))) {
                 do_loadavg = 0;
@@ -197,12 +298,12 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
                 rrddim_set(st, "load5", (collected_number) ((double)sysload.ldavg[1] / sysload.fscale * 1000));
                 rrddim_set(st, "load15", (collected_number) ((double)sysload.ldavg[2] / sysload.fscale * 1000));
                 rrdset_done(st);
+
+                next_loadavg_dt = st->update_every * USEC_PER_SEC;
             }
         }
-
-        last_loadavg_usec = st->update_every * USEC_PER_SEC;
     }
-    else last_loadavg_usec -= dt;
+    else next_loadavg_dt -= dt;
 
     // --------------------------------------------------------------------
 
@@ -254,7 +355,7 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
                     st = rrdset_create("mem", "committed", NULL, "system", NULL, "Committed (Allocated) Memory", "MB", 5000, update_every, RRDSET_TYPE_AREA);
                     st->isdetail = 1;
 
-                    rrddim_add(st, "Committed_AS", NULL, system_pagesize, 1024, RRDDIM_ABSOLUTE);
+                    rrddim_add(st, "Committed_AS", NULL, system_pagesize, MEGA_FACTOR, RRDDIM_ABSOLUTE);
                 }
                 else rrdset_next(st);
 
@@ -313,40 +414,33 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
                 error("DISABLED: cpu.cpuXX");
             } else {
                 pcpu_cp_time = reallocz(pcpu_cp_time, sizeof(cp_time) * ncpus);
+                if (unlikely(getsysctl("kern.cp_times", pcpu_cp_time, sizeof(cp_time) * ncpus))) {
+                    do_cpu_cores = 0;
+                    error("DISABLED: cpu.cpuXX");
+                } else {
+                    for (i = 0; i < ncpus; i++) {
+                        snprintfz(cpuid, MAX_INT_DIGITS, "cpu%d", i);
+                        st = rrdset_find_bytype("cpu", cpuid);
+                        if (unlikely(!st)) {
+                            st = rrdset_create("cpu", cpuid, NULL, "utilization", "cpu.cpu", "Core utilization",
+                                               "percentage", 1000, update_every, RRDSET_TYPE_STACKED);
 
-                for (i = 0; i < ncpus; i++) {
-                    if (unlikely(getsysctl("kern.cp_times", pcpu_cp_time, sizeof(cp_time) * ncpus))) {
-                        do_cpu_cores = 0;
-                        error("DISABLED: cpu.cpuXX");
-                        break;
-                    }
-                    if (unlikely(ncpus > 9999)) {
-                        error("FREEBSD: There are more than 4 digits in cpu cores number");
-                        do_cpu_cores = 0;
-                        error("DISABLED: cpu.cpuXX");
-                        break;
-                    }
-                    snprintfz(cpuid, 8, "cpu%d", i);
+                            rrddim_add(st, "user", NULL, 1, 1, RRDDIM_PCENT_OVER_DIFF_TOTAL);
+                            rrddim_add(st, "nice", NULL, 1, 1, RRDDIM_PCENT_OVER_DIFF_TOTAL);
+                            rrddim_add(st, "system", NULL, 1, 1, RRDDIM_PCENT_OVER_DIFF_TOTAL);
+                            rrddim_add(st, "interrupt", NULL, 1, 1, RRDDIM_PCENT_OVER_DIFF_TOTAL);
+                            rrddim_add(st, "idle", NULL, 1, 1, RRDDIM_PCENT_OVER_DIFF_TOTAL);
+                            rrddim_hide(st, "idle");
+                        } else
+                            rrdset_next(st);
 
-                    st = rrdset_find_bytype("cpu", cpuid);
-                    if (unlikely(!st)) {
-                        st = rrdset_create("cpu", cpuid, NULL, "utilization", "cpu.cpu", "Core utilization", "percentage", 1000, update_every, RRDSET_TYPE_STACKED);
-
-                        rrddim_add(st, "user", NULL, 1, 1, RRDDIM_PCENT_OVER_DIFF_TOTAL);
-                        rrddim_add(st, "nice", NULL, 1, 1, RRDDIM_PCENT_OVER_DIFF_TOTAL);
-                        rrddim_add(st, "system", NULL, 1, 1, RRDDIM_PCENT_OVER_DIFF_TOTAL);
-                        rrddim_add(st, "interrupt", NULL, 1, 1, RRDDIM_PCENT_OVER_DIFF_TOTAL);
-                        rrddim_add(st, "idle", NULL, 1, 1, RRDDIM_PCENT_OVER_DIFF_TOTAL);
-                        rrddim_hide(st, "idle");
-                    }
-                    else rrdset_next(st);
-
-                    rrddim_set(st, "user", pcpu_cp_time[i * 5 + 0]);
-                    rrddim_set(st, "nice", pcpu_cp_time[i * 5 + 1]);
-                    rrddim_set(st, "system", pcpu_cp_time[i * 5 + 2]);
-                    rrddim_set(st, "interrupt", pcpu_cp_time[i * 5 + 3]);
-                    rrddim_set(st, "idle", pcpu_cp_time[i * 5 + 4]);
-                    rrdset_done(st);
+                        rrddim_set(st, "user", pcpu_cp_time[i * 5 + 0]);
+                        rrddim_set(st, "nice", pcpu_cp_time[i * 5 + 1]);
+                        rrddim_set(st, "system", pcpu_cp_time[i * 5 + 2]);
+                        rrddim_set(st, "interrupt", pcpu_cp_time[i * 5 + 3]);
+                        rrddim_set(st, "idle", pcpu_cp_time[i * 5 + 4]);
+                        rrdset_done(st);
+                }
                 }
             }
         }
@@ -380,6 +474,33 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
 
                 rrddim_set(st, "interrupts", totalintr);
                 rrdset_done(st);
+
+                // --------------------------------------------------------------------
+
+                size = nintr * (MAXCOMLEN +1);
+                intrnames = reallocz(intrnames, size);
+                if (unlikely(getsysctl("hw.intrnames", intrnames, size))) {
+                    do_interrupts = 0;
+                    error("DISABLED: system.intr");
+                } else {
+                    st = rrdset_find_bytype("system", "interrupts");
+                    if (unlikely(!st))
+                        st = rrdset_create("system", "interrupts", NULL, "interrupts", NULL, "System interrupts", "interrupts/s",
+                                           1000, update_every, RRDSET_TYPE_STACKED);
+                    else
+                        rrdset_next(st);
+
+                    for (i = 0; i < nintr; i++) {
+                        p = intrnames + i * (MAXCOMLEN + 1);
+                        if (unlikely((intrcnt[i] != 0) && (*(char*)p != 0))) {
+                            rd = rrddim_find(st, p);
+                            if (unlikely(!rd))
+                                rd = rrddim_add(st, p, NULL, 1, 1, RRDDIM_INCREMENTAL);
+                            rrddim_set_by_pointer(st, rd, intrcnt[i]);
+                        }
+                    }
+                    rrdset_done(st);
+                }
             }
         }
     }
@@ -482,34 +603,35 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
                 error("DISABLED: disk.io");
             } else {
                 dstat = devstat_data + sizeof(long); // skip generation number
-                collected_number total_disk_reads = 0;
-                collected_number total_disk_writes = 0;
+                collected_number total_disk_kbytes_read = 0;
+                collected_number total_disk_kbytes_write = 0;
 
                 for (i = 0; i < numdevs; i++) {
-                    if ((dstat[i].device_type == (DEVSTAT_TYPE_IF_SCSI | DEVSTAT_TYPE_DIRECT)) || (dstat[i].device_type == (DEVSTAT_TYPE_IF_IDE | DEVSTAT_TYPE_DIRECT))) {
+                    if (((dstat[i].device_type & DEVSTAT_TYPE_MASK) == DEVSTAT_TYPE_DIRECT) || ((dstat[i].device_type & DEVSTAT_TYPE_MASK) == DEVSTAT_TYPE_STORARRAY)) {
+                        sprintf(disk, "%s%d", dstat[i].device_name, dstat[i].unit_number);
 
                         // --------------------------------------------------------------------
 
-                        st = rrdset_find_bytype(RRD_TYPE_DISK, dstat[i].device_name);
+                        st = rrdset_find_bytype(RRD_TYPE_DISK, disk);
                         if (unlikely(!st)) {
-                            st = rrdset_create(RRD_TYPE_DISK, dstat[i].device_name, NULL, dstat[i].device_name, "disk.io", "Disk I/O Bandwidth", "kilobytes/s", 2000, update_every, RRDSET_TYPE_AREA);
+                            st = rrdset_create(RRD_TYPE_DISK, disk, NULL, disk, "disk.io", "Disk I/O Bandwidth", "kilobytes/s", 2000, update_every, RRDSET_TYPE_AREA);
 
                             rrddim_add(st, "reads", NULL, 1, 1024, RRDDIM_INCREMENTAL);
                             rrddim_add(st, "writes", NULL, -1, 1024, RRDDIM_INCREMENTAL);
                         }
                         else rrdset_next(st);
 
-                        total_disk_reads += dstat[i].bytes[DEVSTAT_READ];
-                        total_disk_writes += dstat[i].bytes[DEVSTAT_WRITE];
+                        total_disk_kbytes_read += dstat[i].bytes[DEVSTAT_READ]/KILO_FACTOR;
+                        total_disk_kbytes_write += dstat[i].bytes[DEVSTAT_WRITE]/KILO_FACTOR;
                         prev_dstat.bytes_read = rrddim_set(st, "reads", dstat[i].bytes[DEVSTAT_READ]);
                         prev_dstat.bytes_write = rrddim_set(st, "writes", dstat[i].bytes[DEVSTAT_WRITE]);
                         rrdset_done(st);
 
                         // --------------------------------------------------------------------
 
-                        st = rrdset_find_bytype("disk_ops", dstat[i].device_name);
+                        st = rrdset_find_bytype("disk_ops", disk);
                         if (unlikely(!st)) {
-                            st = rrdset_create("disk_ops", dstat[i].device_name, NULL, dstat[i].device_name, "disk.ops", "Disk Completed I/O Operations", "operations/s", 2001, update_every, RRDSET_TYPE_LINE);
+                            st = rrdset_create("disk_ops", disk, NULL, disk, "disk.ops", "Disk Completed I/O Operations", "operations/s", 2001, update_every, RRDSET_TYPE_LINE);
                             st->isdetail = 1;
 
                             rrddim_add(st, "reads", NULL, 1, 1, RRDDIM_INCREMENTAL);
@@ -523,9 +645,9 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
 
                         // --------------------------------------------------------------------
 
-                        st = rrdset_find_bytype("disk_qops", dstat[i].device_name);
+                        st = rrdset_find_bytype("disk_qops", disk);
                         if (unlikely(!st)) {
-                            st = rrdset_create("disk_qops", dstat[i].device_name, NULL, dstat[i].device_name, "disk.qops", "Disk Current I/O Operations", "operations", 2002, update_every, RRDSET_TYPE_LINE);
+                            st = rrdset_create("disk_qops", disk, NULL, disk, "disk.qops", "Disk Current I/O Operations", "operations", 2002, update_every, RRDSET_TYPE_LINE);
                             st->isdetail = 1;
 
                             rrddim_add(st, "operations", NULL, 1, 1, RRDDIM_ABSOLUTE);
@@ -537,9 +659,9 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
 
                         // --------------------------------------------------------------------
 
-                        st = rrdset_find_bytype("disk_util", dstat[i].device_name);
+                        st = rrdset_find_bytype("disk_util", disk);
                         if (unlikely(!st)) {
-                            st = rrdset_create("disk_util", dstat[i].device_name, NULL, dstat[i].device_name, "disk.util", "Disk Utilization Time", "% of time working", 2004, update_every, RRDSET_TYPE_AREA);
+                            st = rrdset_create("disk_util", disk, NULL, disk, "disk.util", "Disk Utilization Time", "% of time working", 2004, update_every, RRDSET_TYPE_AREA);
                             st->isdetail = 1;
 
                             rrddim_add(st, "utilization", NULL, 1, 10, RRDDIM_INCREMENTAL);
@@ -552,9 +674,9 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
 
                         // --------------------------------------------------------------------
 
-                        st = rrdset_find_bytype("disk_iotime", dstat[i].device_name);
+                        st = rrdset_find_bytype("disk_iotime", disk);
                         if (unlikely(!st)) {
-                            st = rrdset_create("disk_iotime", dstat[i].device_name, NULL, dstat[i].device_name, "disk.iotime", "Disk Total I/O Time", "milliseconds/s", 2022, update_every, RRDSET_TYPE_LINE);
+                            st = rrdset_create("disk_iotime", disk, NULL, disk, "disk.iotime", "Disk Total I/O Time", "milliseconds/s", 2022, update_every, RRDSET_TYPE_LINE);
                             st->isdetail = 1;
 
                             rrddim_add(st, "reads", NULL, 1, 1, RRDDIM_INCREMENTAL);
@@ -576,9 +698,9 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
 
                             // --------------------------------------------------------------------
 
-                            st = rrdset_find_bytype("disk_await", dstat[i].device_name);
+                            st = rrdset_find_bytype("disk_await", disk);
                             if (unlikely(!st)) {
-                                st = rrdset_create("disk_await", dstat[i].device_name, NULL, dstat[i].device_name, "disk.await", "Average Completed I/O Operation Time", "ms per operation", 2005, update_every, RRDSET_TYPE_LINE);
+                                st = rrdset_create("disk_await", disk, NULL, disk, "disk.await", "Average Completed I/O Operation Time", "ms per operation", 2005, update_every, RRDSET_TYPE_LINE);
                                 st->isdetail = 1;
 
                                 rrddim_add(st, "reads", NULL, 1, 1, RRDDIM_ABSOLUTE);
@@ -586,7 +708,7 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
                             }
                             else rrdset_next(st);
 
-                            rrddim_set(st, "reads", (dstat[i].operations[DEVSTAT_READ] - prev_dstat.operations_read) ? 
+                            rrddim_set(st, "reads", (dstat[i].operations[DEVSTAT_READ] - prev_dstat.operations_read) ?
                                 (cur_dstat.duration_read_ms - prev_dstat.duration_read_ms) / (dstat[i].operations[DEVSTAT_READ] - prev_dstat.operations_read) : 0);
                             rrddim_set(st, "writes", (dstat[i].operations[DEVSTAT_WRITE] - prev_dstat.operations_write) ?
                                 (cur_dstat.duration_write_ms - prev_dstat.duration_write_ms) / (dstat[i].operations[DEVSTAT_WRITE] - prev_dstat.operations_write) : 0);
@@ -594,9 +716,9 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
 
                             // --------------------------------------------------------------------
 
-                            st = rrdset_find_bytype("disk_avgsz", dstat[i].device_name);
+                            st = rrdset_find_bytype("disk_avgsz", disk);
                             if (unlikely(!st)) {
-                                st = rrdset_create("disk_avgsz", dstat[i].device_name, NULL, dstat[i].device_name, "disk.avgsz", "Average Completed I/O Operation Bandwidth", "kilobytes per operation", 2006, update_every, RRDSET_TYPE_AREA);
+                                st = rrdset_create("disk_avgsz", disk, NULL, disk, "disk.avgsz", "Average Completed I/O Operation Bandwidth", "kilobytes per operation", 2006, update_every, RRDSET_TYPE_AREA);
                                 st->isdetail = 1;
 
                                 rrddim_add(st, "reads", NULL, 1, 1024, RRDDIM_ABSOLUTE);
@@ -612,9 +734,9 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
 
                             // --------------------------------------------------------------------
 
-                            st = rrdset_find_bytype("disk_svctm", dstat[i].device_name);
+                            st = rrdset_find_bytype("disk_svctm", disk);
                             if (unlikely(!st)) {
-                                st = rrdset_create("disk_svctm", dstat[i].device_name, NULL, dstat[i].device_name, "disk.svctm", "Average Service Time", "ms per operation", 2007, update_every, RRDSET_TYPE_LINE);
+                                st = rrdset_create("disk_svctm", disk, NULL, disk, "disk.svctm", "Average Service Time", "ms per operation", 2007, update_every, RRDSET_TYPE_LINE);
                                 st->isdetail = 1;
 
                                 rrddim_add(st, "svctm", NULL, 1, 1, RRDDIM_ABSOLUTE);
@@ -626,21 +748,21 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
                             rrdset_done(st);
                         }
                     }
-
-                    // --------------------------------------------------------------------
-
-                    st = rrdset_find_bytype("system", "io");
-                    if (unlikely(!st)) {
-                        st = rrdset_create("system", "io", NULL, "disk", NULL, "Disk I/O", "kilobytes/s", 150, update_every, RRDSET_TYPE_AREA);
-                        rrddim_add(st, "in",  NULL,  1, 1024, RRDDIM_INCREMENTAL);
-                        rrddim_add(st, "out", NULL, -1, 1024, RRDDIM_INCREMENTAL);
-                    }
-                    else rrdset_next(st);
-
-                    rrddim_set(st, "in", total_disk_reads);
-                    rrddim_set(st, "out", total_disk_writes);
-                    rrdset_done(st);
                 }
+
+                // --------------------------------------------------------------------
+
+                st = rrdset_find_bytype("system", "io");
+                if (unlikely(!st)) {
+                    st = rrdset_create("system", "io", NULL, "disk", NULL, "Disk I/O", "kilobytes/s", 150, update_every, RRDSET_TYPE_AREA);
+                    rrddim_add(st, "in",  NULL,  1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "out", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                }
+                else rrdset_next(st);
+
+                rrddim_set(st, "in", total_disk_kbytes_read);
+                rrddim_set(st, "out", total_disk_kbytes_write);
+                rrdset_done(st);
             }
         }
     }
@@ -653,7 +775,7 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
         if (unlikely(sysctlnametomib("vm.swap_info", mib, &mibsize) == -1)) {
             error("FREEBSD: sysctl(%s...) failed: %s", "vm.swap_info", strerror(errno));
             do_swap = 0;
-            error("DISABLED: disk.io");
+            error("DISABLED: system.swap");
         } else {
             for (i = 0; ; i++) {
                 mib[mibsize] = i;
@@ -662,17 +784,17 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
                     if (unlikely(errno != ENOENT)) {
                         error("FREEBSD: sysctl(%s...) failed: %s", "vm.swap_info", strerror(errno));
                         do_swap = 0;
-                        error("DISABLED: disk.io");
+                        error("DISABLED: system.swap");
                     } else {
                         if (unlikely(size != sizeof(xsw))) {
                             error("FREEBSD: sysctl(%s...) expected %lu, got %lu", "vm.swap_info", (unsigned long)sizeof(xsw), (unsigned long)size);
                             do_swap = 0;
-                            error("DISABLED: disk.io");
+                            error("DISABLED: system.swap");
                         } else break;
                     }
                 }
-                total_xsw.bytes_used += xsw.xsw_used * system_pagesize;
-                total_xsw.bytes_total += xsw.xsw_nblks * system_pagesize;
+                total_xsw.bytes_used += xsw.xsw_used;
+                total_xsw.bytes_total += xsw.xsw_nblks;
             }
 
             if (likely(do_swap)) {
@@ -681,8 +803,8 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
                     st = rrdset_create("system", "swap", NULL, "swap", NULL, "System Swap", "MB", 201, update_every, RRDSET_TYPE_STACKED);
                     st->isdetail = 1;
 
-                    rrddim_add(st, "free",    NULL, 1, 1048576, RRDDIM_ABSOLUTE);
-                    rrddim_add(st, "used",    NULL, 1, 1048576, RRDDIM_ABSOLUTE);
+                    rrddim_add(st, "free",    NULL, system_pagesize, MEGA_FACTOR, RRDDIM_ABSOLUTE);
+                    rrddim_add(st, "used",    NULL, system_pagesize, MEGA_FACTOR, RRDDIM_ABSOLUTE);
                 }
                 else rrdset_next(st);
 
@@ -699,29 +821,35 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
         if (unlikely(GETSYSCTL("vm.stats.vm.v_active_count",    vmmeter_data.v_active_count) ||
                      GETSYSCTL("vm.stats.vm.v_inactive_count",  vmmeter_data.v_inactive_count) ||
                      GETSYSCTL("vm.stats.vm.v_wire_count",      vmmeter_data.v_wire_count) ||
+#if __FreeBSD_version < 1200016
                      GETSYSCTL("vm.stats.vm.v_cache_count",     vmmeter_data.v_cache_count) ||
+#endif
                      GETSYSCTL("vfs.bufspace",                  vfs_bufspace_count) ||
                      GETSYSCTL("vm.stats.vm.v_free_count",      vmmeter_data.v_free_count))) {
-            do_swapio = 0;
-            error("DISABLED: system.swapio");
+            do_ram = 0;
+            error("DISABLED: system.ram");
         } else {
             st = rrdset_find("system.ram");
             if (unlikely(!st)) {
                 st = rrdset_create("system", "ram", NULL, "ram", NULL, "System RAM", "MB", 200, update_every, RRDSET_TYPE_STACKED);
 
-                rrddim_add(st, "active",    NULL, system_pagesize, 1024, RRDDIM_ABSOLUTE);
-                rrddim_add(st, "inactive",  NULL, system_pagesize, 1024, RRDDIM_ABSOLUTE);
-                rrddim_add(st, "wired",     NULL, system_pagesize, 1024, RRDDIM_ABSOLUTE);
-                rrddim_add(st, "cache",     NULL, system_pagesize, 1024, RRDDIM_ABSOLUTE);
-                rrddim_add(st, "buffers",   NULL, 1, 1024, RRDDIM_ABSOLUTE);
-                rrddim_add(st, "free",      NULL, system_pagesize, 1024, RRDDIM_ABSOLUTE);
+                rrddim_add(st, "active",    NULL, system_pagesize, MEGA_FACTOR, RRDDIM_ABSOLUTE);
+                rrddim_add(st, "inactive",  NULL, system_pagesize, MEGA_FACTOR, RRDDIM_ABSOLUTE);
+                rrddim_add(st, "wired",     NULL, system_pagesize, MEGA_FACTOR, RRDDIM_ABSOLUTE);
+#if __FreeBSD_version < 1200016
+                rrddim_add(st, "cache",     NULL, system_pagesize, MEGA_FACTOR, RRDDIM_ABSOLUTE);
+#endif
+                rrddim_add(st, "buffers",   NULL, 1, MEGA_FACTOR, RRDDIM_ABSOLUTE);
+                rrddim_add(st, "free",      NULL, system_pagesize, MEGA_FACTOR, RRDDIM_ABSOLUTE);
             }
             else rrdset_next(st);
 
             rrddim_set(st, "active",    vmmeter_data.v_active_count);
             rrddim_set(st, "inactive",  vmmeter_data.v_inactive_count);
             rrddim_set(st, "wired",     vmmeter_data.v_wire_count);
+#if __FreeBSD_version < 1200016
             rrddim_set(st, "cache",     vmmeter_data.v_cache_count);
+#endif
             rrddim_set(st, "buffers",   vfs_bufspace_count);
             rrddim_set(st, "free",      vmmeter_data.v_free_count);
             rrdset_done(st);
@@ -951,9 +1079,6 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
     if (likely(do_netisr || do_netisr_per_core)) {
         if (unlikely(GETSYSCTL("kern.smp.cpus", ncpus))) {
             common_error = 1;
-        } else if (unlikely(ncpus > 9999)) {
-            error("FREEBSD: There are more than 4 digits in cpu cores number");
-            common_error = 1;
         } else if (unlikely(sysctlbyname("net.isr.workstream", NULL, &netisr_workstream_size, NULL, 0) == -1)) {
             error("FREEBSD: sysctl(net.isr.workstream...) failed: %s", strerror(errno));
             common_error = 1;
@@ -1160,12 +1285,16 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
                     st->isdetail = 1;
 
                     rrddim_add(st, "inbound", NULL, 1, 1, RRDDIM_INCREMENTAL);
+#if __FreeBSD__ >= 11
                     rrddim_add(st, "outbound", NULL, -1, 1, RRDDIM_INCREMENTAL);
+#endif
                 }
                 else rrdset_next(st);
 
                 rrddim_set(st, "inbound", IFA_DATA(iqdrops));
+#if __FreeBSD__ >= 11
                 rrddim_set(st, "outbound", IFA_DATA(oqdrops));
+#endif
                 rrdset_done(st);
 
                 // --------------------------------------------------------------------
@@ -1186,6 +1315,887 @@ int do_freebsd_sysctl(int update_every, usec_t dt) {
             }
 
             freeifaddrs(ifap);
+        }
+    }
+
+    // --------------------------------------------------------------------
+
+    // see http://net-snmp.sourceforge.net/docs/mibs/tcp.html
+    if (likely(do_tcp_sockets)) {
+        if (unlikely(GETSYSCTL("net.inet.tcp.states", tcps_states))) {
+            do_tcp_sockets = 0;
+            error("DISABLED: ipv4.tcpsock");
+        } else {
+            if (likely(do_tcp_sockets)) {
+                st = rrdset_find("ipv4.tcpsock");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "tcpsock", NULL, "tcp", NULL, "IPv4 TCP Connections",
+                                       "active connections", 2500, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "CurrEstab", "connections", 1, 1, RRDDIM_ABSOLUTE);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "CurrEstab", tcps_states[TCPS_ESTABLISHED]);
+                rrdset_done(st);
+            }
+        }
+    }
+
+    // --------------------------------------------------------------------
+
+    // see http://net-snmp.sourceforge.net/docs/mibs/tcp.html
+    if (likely(do_tcp_packets || do_tcp_errors || do_tcp_handshake || do_tcpext_connaborts || do_tcpext_ofo || do_tcpext_syscookies || do_ecn)) {
+        if (unlikely(GETSYSCTL("net.inet.tcp.stats", tcpstat))){
+            do_tcp_packets = 0;
+            error("DISABLED: ipv4.tcppackets");
+            do_tcp_errors = 0;
+            error("DISABLED: ipv4.tcperrors");
+            do_tcp_handshake = 0;
+            error("DISABLED: ipv4.tcphandshake");
+            do_tcpext_connaborts = 0;
+            error("DISABLED: ipv4.tcpconnaborts");
+            do_tcpext_ofo = 0;
+            error("DISABLED: ipv4.tcpofo");
+            do_tcpext_syscookies = 0;
+            error("DISABLED: ipv4.tcpsyncookies");
+            do_ecn = 0;
+            error("DISABLED: ipv4.ecnpkts");
+        } else {
+            if (likely(do_tcp_packets)) {
+                st = rrdset_find("ipv4.tcppackets");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "tcppackets", NULL, "tcp", NULL, "IPv4 TCP Packets",
+                                       "packets/s",
+                                       2600, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "InSegs", "received", 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutSegs", "sent", -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InSegs", tcpstat.tcps_rcvtotal);
+                rrddim_set(st, "OutSegs", tcpstat.tcps_sndtotal);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (likely(do_tcp_errors)) {
+                st = rrdset_find("ipv4.tcperrors");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "tcperrors", NULL, "tcp", NULL, "IPv4 TCP Errors",
+                                       "packets/s",
+                                       2700, update_every, RRDSET_TYPE_LINE);
+                    st->isdetail = 1;
+
+                    rrddim_add(st, "InErrs", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InCsumErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "RetransSegs", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+#if __FreeBSD__ >= 11
+                rrddim_set(st, "InErrs", tcpstat.tcps_rcvbadoff + tcpstat.tcps_rcvreassfull + tcpstat.tcps_rcvshort);
+#else
+                rrddim_set(st, "InErrs", tcpstat.tcps_rcvbadoff + tcpstat.tcps_rcvshort);
+#endif
+                rrddim_set(st, "InCsumErrors", tcpstat.tcps_rcvbadsum);
+                rrddim_set(st, "RetransSegs", tcpstat.tcps_sndrexmitpack);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (likely(do_tcp_handshake)) {
+                st = rrdset_find("ipv4.tcphandshake");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "tcphandshake", NULL, "tcp", NULL,
+                                       "IPv4 TCP Handshake Issues",
+                                       "events/s", 2900, update_every, RRDSET_TYPE_LINE);
+                    st->isdetail = 1;
+
+                    rrddim_add(st, "EstabResets", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "ActiveOpens", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "PassiveOpens", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "AttemptFails", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "EstabResets", tcpstat.tcps_drops);
+                rrddim_set(st, "ActiveOpens", tcpstat.tcps_connattempt);
+                rrddim_set(st, "PassiveOpens", tcpstat.tcps_accepts);
+                rrddim_set(st, "AttemptFails", tcpstat.tcps_conndrops);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_tcpext_connaborts == CONFIG_ONDEMAND_YES || (do_tcpext_connaborts == CONFIG_ONDEMAND_ONDEMAND && (tcpstat.tcps_rcvpackafterwin || tcpstat.tcps_rcvafterclose || tcpstat.tcps_rcvmemdrop || tcpstat.tcps_persistdrop || tcpstat.tcps_finwait2_drops))) {
+                do_tcpext_connaborts = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv4.tcpconnaborts");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "tcpconnaborts", NULL, "tcp", NULL, "TCP Connection Aborts", "connections/s", 3010, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "TCPAbortOnData",    "baddata",     1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "TCPAbortOnClose",   "userclosed",  1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "TCPAbortOnMemory",  "nomemory",    1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "TCPAbortOnTimeout", "timeout",     1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "TCPAbortOnLinger",  "linger",      1, 1, RRDDIM_INCREMENTAL);
+                }
+                else rrdset_next(st);
+
+                rrddim_set(st, "TCPAbortOnData",    tcpstat.tcps_rcvpackafterwin);
+                rrddim_set(st, "TCPAbortOnClose",   tcpstat.tcps_rcvafterclose);
+                rrddim_set(st, "TCPAbortOnMemory",  tcpstat.tcps_rcvmemdrop);
+                rrddim_set(st, "TCPAbortOnTimeout", tcpstat.tcps_persistdrop);
+                rrddim_set(st, "TCPAbortOnLinger",  tcpstat.tcps_finwait2_drops);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_tcpext_ofo == CONFIG_ONDEMAND_YES || (do_tcpext_ofo == CONFIG_ONDEMAND_ONDEMAND && tcpstat.tcps_rcvoopack)) {
+                do_tcpext_ofo = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv4.tcpofo");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "tcpofo", NULL, "tcp", NULL, "TCP Out-Of-Order Queue", "packets/s", 3050, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "TCPOFOQueue", "inqueue",  1, 1, RRDDIM_INCREMENTAL);
+                }
+                else rrdset_next(st);
+
+                rrddim_set(st, "TCPOFOQueue",   tcpstat.tcps_rcvoopack);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_tcpext_syscookies == CONFIG_ONDEMAND_YES || (do_tcpext_syscookies == CONFIG_ONDEMAND_ONDEMAND && (tcpstat.tcps_sc_sendcookie || tcpstat.tcps_sc_recvcookie || tcpstat.tcps_sc_zonefail))) {
+                do_tcpext_syscookies = CONFIG_ONDEMAND_YES;
+
+                st = rrdset_find("ipv4.tcpsyncookies");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "tcpsyncookies", NULL, "tcp", NULL, "TCP SYN Cookies", "packets/s", 3100, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "SyncookiesRecv",   "received",  1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "SyncookiesSent",   "sent",     -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "SyncookiesFailed", "failed",   -1, 1, RRDDIM_INCREMENTAL);
+                }
+                else rrdset_next(st);
+
+                rrddim_set(st, "SyncookiesRecv",   tcpstat.tcps_sc_recvcookie);
+                rrddim_set(st, "SyncookiesSent",   tcpstat.tcps_sc_sendcookie);
+                rrddim_set(st, "SyncookiesFailed", tcpstat.tcps_sc_zonefail);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_ecn == CONFIG_ONDEMAND_YES || (do_ecn == CONFIG_ONDEMAND_ONDEMAND && (tcpstat.tcps_ecn_ce || tcpstat.tcps_ecn_ect0 || tcpstat.tcps_ecn_ect1))) {
+                do_ecn = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv4.ecnpkts");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "ecnpkts", NULL, "ecn", NULL, "IPv4 ECN Statistics", "packets/s", 8700, update_every, RRDSET_TYPE_LINE);
+                    st->isdetail = 1;
+
+                    rrddim_add(st, "InCEPkts", "CEP", 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InNoECTPkts", "NoECTP", -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InECT0Pkts", "ECTP0", 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InECT1Pkts", "ECTP1", 1, 1, RRDDIM_INCREMENTAL);
+                }
+                else rrdset_next(st);
+
+                rrddim_set(st, "InCEPkts", tcpstat.tcps_ecn_ce);
+                rrddim_set(st, "InNoECTPkts", tcpstat.tcps_ecn_ce - (tcpstat.tcps_ecn_ect0 + tcpstat.tcps_ecn_ect1));
+                rrddim_set(st, "InECT0Pkts", tcpstat.tcps_ecn_ect0);
+                rrddim_set(st, "InECT1Pkts", tcpstat.tcps_ecn_ect1);
+                rrdset_done(st);
+            }
+
+        }
+    }
+
+    // --------------------------------------------------------------------
+
+    // see http://net-snmp.sourceforge.net/docs/mibs/udp.html
+    if (likely(do_udp_packets || do_udp_errors)) {
+        if (unlikely(GETSYSCTL("net.inet.udp.stats", udpstat))) {
+            do_udp_packets = 0;
+            error("DISABLED: ipv4.udppackets");
+            do_udp_errors = 0;
+            error("DISABLED: ipv4.udperrors");
+        } else {
+            if (likely(do_udp_packets)) {
+                st = rrdset_find("ipv4.udppackets");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "udppackets", NULL, "udp", NULL, "IPv4 UDP Packets",
+                                       "packets/s", 2601, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "InDatagrams", "received", 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutDatagrams", "sent", -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InDatagrams", udpstat.udps_ipackets);
+                rrddim_set(st, "OutDatagrams", udpstat.udps_opackets);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (likely(do_udp_errors)) {
+                st = rrdset_find("ipv4.udperrors");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "udperrors", NULL, "udp", NULL, "IPv4 UDP Errors", "events/s",
+                                       2701, update_every, RRDSET_TYPE_LINE);
+                    st->isdetail = 1;
+
+                    rrddim_add(st, "RcvbufErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "NoPorts", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InCsumErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "IgnoredMulti", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InErrors", udpstat.udps_hdrops + udpstat.udps_badlen);
+                rrddim_set(st, "NoPorts", udpstat.udps_noport);
+                rrddim_set(st, "RcvbufErrors", udpstat.udps_fullsock);
+                rrddim_set(st, "InCsumErrors", udpstat.udps_badsum + udpstat.udps_nosum);
+                rrddim_set(st, "IgnoredMulti", udpstat.udps_filtermcast);
+                rrdset_done(st);
+            }
+        }
+    }
+
+    // --------------------------------------------------------------------
+
+    if (likely(do_icmp_packets || do_icmpmsg)) {
+        if (unlikely(GETSYSCTL("net.inet.icmp.stats", icmpstat))) {
+            do_icmp_packets = 0;
+            error("DISABLED: ipv4.icmp");
+            error("DISABLED: ipv4.icmp_errors");
+            do_icmpmsg = 0;
+            error("DISABLED: ipv4.icmpmsg");
+        } else {
+            for (i = 0; i <= ICMP_MAXTYPE; i++) {
+                icmp_total.msgs_in += icmpstat.icps_inhist[i];
+                icmp_total.msgs_out += icmpstat.icps_outhist[i];
+            }
+            icmp_total.msgs_in += icmpstat.icps_badcode + icmpstat.icps_badlen + icmpstat.icps_checksum + icmpstat.icps_tooshort;
+
+            // --------------------------------------------------------------------
+
+            if (likely(do_icmp_packets)) {
+                st = rrdset_find("ipv4.icmp");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "icmp", NULL, "icmp", NULL, "IPv4 ICMP Packets", "packets/s",
+                                       2602,
+                                       update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "InMsgs", "received", 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutMsgs", "sent", -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InMsgs", icmp_total.msgs_in);
+                rrddim_set(st, "OutMsgs", icmp_total.msgs_out);
+
+                rrdset_done(st);
+
+                // --------------------------------------------------------------------
+
+                st = rrdset_find("ipv4.icmp_errors");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "icmp_errors", NULL, "icmp", NULL, "IPv4 ICMP Errors",
+                                       "packets/s",
+                                       2603, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "InErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutErrors", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InCsumErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InErrors", icmpstat.icps_badcode + icmpstat.icps_badlen + icmpstat.icps_checksum + icmpstat.icps_tooshort);
+                rrddim_set(st, "OutErrors", icmpstat.icps_error);
+                rrddim_set(st, "InCsumErrors", icmpstat.icps_checksum);
+
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (likely(do_icmpmsg)) {
+                st = rrdset_find("ipv4.icmpmsg");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "icmpmsg", NULL, "icmp", NULL, "IPv4 ICMP Messsages",
+                                       "packets/s", 2604, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "InEchoReps", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutEchoReps", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InEchos", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutEchos", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                    rrddim_set(st, "InEchoReps", icmpstat.icps_inhist[ICMP_ECHOREPLY]);
+                    rrddim_set(st, "OutEchoReps", icmpstat.icps_outhist[ICMP_ECHOREPLY]);
+                    rrddim_set(st, "InEchos", icmpstat.icps_inhist[ICMP_ECHO]);
+                    rrddim_set(st, "OutEchos", icmpstat.icps_outhist[ICMP_ECHO]);
+
+                rrdset_done(st);
+            }
+        }
+    }
+
+    // --------------------------------------------------------------------
+
+    // see also http://net-snmp.sourceforge.net/docs/mibs/ip.html
+    if (likely(do_ip_packets || do_ip_fragsout || do_ip_fragsin || do_ip_errors)) {
+        if (unlikely(GETSYSCTL("net.inet.ip.stats", ipstat))) {
+            do_ip_packets = 0;
+            error("DISABLED: ipv4.packets");
+            do_ip_fragsout = 0;
+            error("DISABLED: ipv4.fragsout");
+            do_ip_fragsin = 0;
+            error("DISABLED: ipv4.fragsin");
+            do_ip_errors = 0;
+            error("DISABLED: ipv4.errors");
+        } else {
+            if (likely(do_ip_packets)) {
+                st = rrdset_find("ipv4.packets");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "packets", NULL, "packets", NULL, "IPv4 Packets", "packets/s",
+                                       3000, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "InReceives", "received", 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutRequests", "sent", -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "ForwDatagrams", "forwarded", 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InDelivers", "delivered", 1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "OutRequests", ipstat.ips_localout);
+                rrddim_set(st, "InReceives", ipstat.ips_total);
+                rrddim_set(st, "ForwDatagrams", ipstat.ips_forward);
+                rrddim_set(st, "InDelivers", ipstat.ips_delivered);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (likely(do_ip_fragsout)) {
+                st = rrdset_find("ipv4.fragsout");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "fragsout", NULL, "fragments", NULL, "IPv4 Fragments Sent",
+                                       "packets/s", 3010, update_every, RRDSET_TYPE_LINE);
+                    st->isdetail = 1;
+
+                    rrddim_add(st, "FragOKs", "ok", 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "FragFails", "failed", -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "FragCreates", "created", 1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "FragOKs", ipstat.ips_fragmented);
+                rrddim_set(st, "FragFails", ipstat.ips_cantfrag);
+                rrddim_set(st, "FragCreates", ipstat.ips_ofragments);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (likely(do_ip_fragsin)) {
+                st = rrdset_find("ipv4.fragsin");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "fragsin", NULL, "fragments", NULL,
+                                       "IPv4 Fragments Reassembly",
+                                       "packets/s", 3011, update_every, RRDSET_TYPE_LINE);
+                    st->isdetail = 1;
+
+                    rrddim_add(st, "ReasmOKs", "ok", 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "ReasmFails", "failed", -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "ReasmReqds", "all", 1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "ReasmOKs", ipstat.ips_fragments);
+                rrddim_set(st, "ReasmFails", ipstat.ips_fragdropped);
+                rrddim_set(st, "ReasmReqds", ipstat.ips_reassembled);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (likely(do_ip_errors)) {
+                st = rrdset_find("ipv4.errors");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv4", "errors", NULL, "errors", NULL, "IPv4 Errors", "packets/s",
+                                       3002,
+                                       update_every, RRDSET_TYPE_LINE);
+                    st->isdetail = 1;
+
+                    rrddim_add(st, "InDiscards", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutDiscards", NULL, -1, 1, RRDDIM_INCREMENTAL);
+
+                    rrddim_add(st, "InHdrErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutNoRoutes", NULL, -1, 1, RRDDIM_INCREMENTAL);
+
+                    rrddim_add(st, "InAddrErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InUnknownProtos", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InDiscards", ipstat.ips_badsum + ipstat.ips_tooshort + ipstat.ips_toosmall + ipstat.ips_toolong);
+                rrddim_set(st, "OutDiscards", ipstat.ips_odropped);
+                rrddim_set(st, "InHdrErrors", ipstat.ips_badhlen + ipstat.ips_badlen + ipstat.ips_badoptions + ipstat.ips_badvers);
+                rrddim_set(st, "InAddrErrors", ipstat.ips_badaddr);
+                rrddim_set(st, "InUnknownProtos", ipstat.ips_noproto);
+                rrddim_set(st, "OutNoRoutes", ipstat.ips_noroute);
+                rrdset_done(st);
+            }
+        }
+    }
+
+    // --------------------------------------------------------------------
+
+    if (likely(do_ip6_packets || do_ip6_fragsout || do_ip6_fragsin || do_ip6_errors)) {
+        if (unlikely(GETSYSCTL("net.inet6.ip6.stats", ip6stat))) {
+            do_ip6_packets = 0;
+            error("DISABLED: ipv6.packets");
+            do_ip6_fragsout = 0;
+            error("DISABLED: ipv6.fragsout");
+            do_ip6_fragsin = 0;
+            error("DISABLED: ipv6.fragsin");
+            do_ip6_errors = 0;
+            error("DISABLED: ipv6.errors");
+        } else {
+            if (do_ip6_packets == CONFIG_ONDEMAND_YES || (do_ip6_packets == CONFIG_ONDEMAND_ONDEMAND &&
+                                                          (ip6stat.ip6s_localout || ip6stat.ip6s_total ||
+                                                           ip6stat.ip6s_forward || ip6stat.ip6s_delivered))) {
+                do_ip6_packets = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv6.packets");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv6", "packets", NULL, "packets", NULL, "IPv6 Packets", "packets/s", 3000,
+                                       update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "received", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "sent", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "forwarded", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "delivers", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "sent", ip6stat.ip6s_localout);
+                rrddim_set(st, "received", ip6stat.ip6s_total);
+                rrddim_set(st, "forwarded", ip6stat.ip6s_forward);
+                rrddim_set(st, "delivers", ip6stat.ip6s_delivered);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_ip6_fragsout == CONFIG_ONDEMAND_YES || (do_ip6_fragsout == CONFIG_ONDEMAND_ONDEMAND &&
+                                                           (ip6stat.ip6s_fragmented || ip6stat.ip6s_cantfrag ||
+                                                            ip6stat.ip6s_ofragments))) {
+                do_ip6_fragsout = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv6.fragsout");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv6", "fragsout", NULL, "fragments", NULL, "IPv6 Fragments Sent",
+                                       "packets/s", 3010, update_every, RRDSET_TYPE_LINE);
+                    st->isdetail = 1;
+
+                    rrddim_add(st, "ok", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "failed", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "all", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "ok", ip6stat.ip6s_fragmented);
+                rrddim_set(st, "failed", ip6stat.ip6s_cantfrag);
+                rrddim_set(st, "all", ip6stat.ip6s_ofragments);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_ip6_fragsin == CONFIG_ONDEMAND_YES || (do_ip6_fragsin == CONFIG_ONDEMAND_ONDEMAND &&
+                                                          (ip6stat.ip6s_reassembled || ip6stat.ip6s_fragdropped ||
+                                                           ip6stat.ip6s_fragtimeout || ip6stat.ip6s_fragments))) {
+                do_ip6_fragsin = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv6.fragsin");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv6", "fragsin", NULL, "fragments", NULL, "IPv6 Fragments Reassembly",
+                                       "packets/s", 3011, update_every, RRDSET_TYPE_LINE);
+                    st->isdetail = 1;
+
+                    rrddim_add(st, "ok", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "failed", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "timeout", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "all", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "ok", ip6stat.ip6s_reassembled);
+                rrddim_set(st, "failed", ip6stat.ip6s_fragdropped);
+                rrddim_set(st, "timeout", ip6stat.ip6s_fragtimeout);
+                rrddim_set(st, "all", ip6stat.ip6s_fragments);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_ip6_errors == CONFIG_ONDEMAND_YES || (do_ip6_errors == CONFIG_ONDEMAND_ONDEMAND && (
+                    ip6stat.ip6s_toosmall ||
+                    ip6stat.ip6s_odropped ||
+                    ip6stat.ip6s_badoptions ||
+                    ip6stat.ip6s_badvers ||
+                    ip6stat.ip6s_exthdrtoolong ||
+                    ip6stat.ip6s_sources_none ||
+                    ip6stat.ip6s_tooshort ||
+                    ip6stat.ip6s_cantforward ||
+                    ip6stat.ip6s_noroute))) {
+                do_ip6_errors = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv6.errors");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv6", "errors", NULL, "errors", NULL, "IPv6 Errors", "packets/s", 3002,
+                                       update_every, RRDSET_TYPE_LINE);
+                    st->isdetail = 1;
+
+                    rrddim_add(st, "InDiscards", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutDiscards", NULL, -1, 1, RRDDIM_INCREMENTAL);
+
+                    rrddim_add(st, "InHdrErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InAddrErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InTruncatedPkts", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InNoRoutes", NULL, 1, 1, RRDDIM_INCREMENTAL);
+
+                    rrddim_add(st, "OutNoRoutes", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InDiscards", ip6stat.ip6s_toosmall);
+                rrddim_set(st, "OutDiscards", ip6stat.ip6s_odropped);
+
+                rrddim_set(st, "InHdrErrors",
+                           ip6stat.ip6s_badoptions + ip6stat.ip6s_badvers + ip6stat.ip6s_exthdrtoolong);
+                rrddim_set(st, "InAddrErrors", ip6stat.ip6s_sources_none);
+                rrddim_set(st, "InTruncatedPkts", ip6stat.ip6s_tooshort);
+                rrddim_set(st, "InNoRoutes", ip6stat.ip6s_cantforward);
+
+                rrddim_set(st, "OutNoRoutes", ip6stat.ip6s_noroute);
+                rrdset_done(st);
+            }
+        }
+    }
+
+    // --------------------------------------------------------------------
+
+    if (likely(do_icmp6 || do_icmp6_redir || do_icmp6_errors || do_icmp6_echos || do_icmp6_router || do_icmp6_neighbor || do_icmp6_types)) {
+        if (unlikely(GETSYSCTL("net.inet6.icmp6.stats", icmp6stat))) {
+            do_icmp6 = 0;
+            error("DISABLED: ipv6.icmp");
+        } else {
+            for (i = 0; i <= ICMP6_MAXTYPE; i++) {
+                icmp6_total.msgs_in += icmp6stat.icp6s_inhist[i];
+                icmp6_total.msgs_out += icmp6stat.icp6s_outhist[i];
+            }
+            icmp6_total.msgs_in += icmp6stat.icp6s_badcode + icmp6stat.icp6s_badlen + icmp6stat.icp6s_checksum + icmp6stat.icp6s_tooshort;
+            if (do_icmp6 == CONFIG_ONDEMAND_YES || (do_icmp6 == CONFIG_ONDEMAND_ONDEMAND && (icmp6_total.msgs_in || icmp6_total.msgs_out))) {
+                do_icmp6 = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv6.icmp");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv6", "icmp", NULL, "icmp", NULL, "IPv6 ICMP Messages",
+                                       "messages/s", 10000, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "received", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "sent", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "sent", icmp6_total.msgs_in);
+                rrddim_set(st, "received", icmp6_total.msgs_out);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_icmp6_redir == CONFIG_ONDEMAND_YES || (do_icmp6_redir == CONFIG_ONDEMAND_ONDEMAND && (icmp6stat.icp6s_inhist[ND_REDIRECT] || icmp6stat.icp6s_outhist[ND_REDIRECT]))) {
+                do_icmp6_redir = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv6.icmpredir");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv6", "icmpredir", NULL, "icmp", NULL, "IPv6 ICMP Redirects",
+                                       "redirects/s", 10050, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "received", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "sent", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "sent", icmp6stat.icp6s_inhist[ND_REDIRECT]);
+                rrddim_set(st, "received", icmp6stat.icp6s_outhist[ND_REDIRECT]);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_icmp6_errors == CONFIG_ONDEMAND_YES || (do_icmp6_errors == CONFIG_ONDEMAND_ONDEMAND && (
+                                                                            icmp6stat.icp6s_badcode ||
+                                                                            icmp6stat.icp6s_badlen ||
+                                                                            icmp6stat.icp6s_checksum ||
+                                                                            icmp6stat.icp6s_tooshort ||
+                                                                            icmp6stat.icp6s_error ||
+                                                                            icmp6stat.icp6s_inhist[ICMP6_DST_UNREACH] ||
+                                                                            icmp6stat.icp6s_inhist[ICMP6_TIME_EXCEEDED] ||
+                                                                            icmp6stat.icp6s_inhist[ICMP6_PARAM_PROB] ||
+                                                                            icmp6stat.icp6s_outhist[ICMP6_DST_UNREACH] ||
+                                                                            icmp6stat.icp6s_outhist[ICMP6_TIME_EXCEEDED] ||
+                                                                            icmp6stat.icp6s_outhist[ICMP6_PARAM_PROB]))) {
+                do_icmp6_errors = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv6.icmperrors");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv6", "icmperrors", NULL, "icmp", NULL, "IPv6 ICMP Errors", "errors/s", 10100, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "InErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutErrors", NULL, -1, 1, RRDDIM_INCREMENTAL);
+
+                    rrddim_add(st, "InCsumErrors", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InDestUnreachs", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InPktTooBigs", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InTimeExcds", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InParmProblems", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutDestUnreachs", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutTimeExcds", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutParmProblems", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InErrors", icmp6stat.icp6s_badcode + icmp6stat.icp6s_badlen + icmp6stat.icp6s_checksum + icmp6stat.icp6s_tooshort);
+                rrddim_set(st, "OutErrors", icmp6stat.icp6s_error);
+                rrddim_set(st, "InCsumErrors", icmp6stat.icp6s_checksum);
+                rrddim_set(st, "InDestUnreachs", icmp6stat.icp6s_inhist[ICMP6_DST_UNREACH]);
+                rrddim_set(st, "InPktTooBigs", icmp6stat.icp6s_badlen);
+                rrddim_set(st, "InTimeExcds", icmp6stat.icp6s_inhist[ICMP6_TIME_EXCEEDED]);
+                rrddim_set(st, "InParmProblems", icmp6stat.icp6s_inhist[ICMP6_PARAM_PROB]);
+                rrddim_set(st, "OutDestUnreachs", icmp6stat.icp6s_outhist[ICMP6_DST_UNREACH]);
+                rrddim_set(st, "OutTimeExcds", icmp6stat.icp6s_outhist[ICMP6_TIME_EXCEEDED]);
+                rrddim_set(st, "OutParmProblems", icmp6stat.icp6s_outhist[ICMP6_PARAM_PROB]);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_icmp6_echos == CONFIG_ONDEMAND_YES || (do_icmp6_echos == CONFIG_ONDEMAND_ONDEMAND && (
+                                                                 icmp6stat.icp6s_inhist[ICMP6_ECHO_REQUEST] ||
+                                                                 icmp6stat.icp6s_outhist[ICMP6_ECHO_REQUEST] ||
+                                                                 icmp6stat.icp6s_inhist[ICMP6_ECHO_REPLY] ||
+                                                                 icmp6stat.icp6s_outhist[ICMP6_ECHO_REPLY]))) {
+                do_icmp6_echos = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv6.icmpechos");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv6", "icmpechos", NULL, "icmp", NULL, "IPv6 ICMP Echo", "messages/s", 10200, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "InEchos", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutEchos", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InEchoReplies", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutEchoReplies", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InEchos", icmp6stat.icp6s_inhist[ICMP6_ECHO_REQUEST]);
+                rrddim_set(st, "OutEchos", icmp6stat.icp6s_outhist[ICMP6_ECHO_REQUEST]);
+                rrddim_set(st, "InEchoReplies", icmp6stat.icp6s_inhist[ICMP6_ECHO_REPLY]);
+                rrddim_set(st, "OutEchoReplies", icmp6stat.icp6s_outhist[ICMP6_ECHO_REPLY]);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_icmp6_router == CONFIG_ONDEMAND_YES || (do_icmp6_router == CONFIG_ONDEMAND_ONDEMAND && (
+                                                                    icmp6stat.icp6s_inhist[ND_ROUTER_SOLICIT] ||
+                                                                    icmp6stat.icp6s_outhist[ND_ROUTER_SOLICIT] ||
+                                                                    icmp6stat.icp6s_inhist[ND_ROUTER_ADVERT] ||
+                                                                    icmp6stat.icp6s_outhist[ND_ROUTER_ADVERT]))) {
+                do_icmp6_router = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv6.icmprouter");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv6", "icmprouter", NULL, "icmp", NULL, "IPv6 Router Messages", "messages/s", 10400, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "InSolicits", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutSolicits", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InAdvertisements", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutAdvertisements", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InSolicits", icmp6stat.icp6s_inhist[ND_ROUTER_SOLICIT]);
+                rrddim_set(st, "OutSolicits", icmp6stat.icp6s_outhist[ND_ROUTER_SOLICIT]);
+                rrddim_set(st, "InAdvertisements", icmp6stat.icp6s_inhist[ND_ROUTER_ADVERT]);
+                rrddim_set(st, "OutAdvertisements", icmp6stat.icp6s_outhist[ND_ROUTER_ADVERT]);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_icmp6_neighbor == CONFIG_ONDEMAND_YES || (do_icmp6_neighbor == CONFIG_ONDEMAND_ONDEMAND && (
+                                                                    icmp6stat.icp6s_inhist[ND_NEIGHBOR_SOLICIT] ||
+                                                                    icmp6stat.icp6s_outhist[ND_NEIGHBOR_SOLICIT] ||
+                                                                    icmp6stat.icp6s_inhist[ND_NEIGHBOR_ADVERT] ||
+                                                                    icmp6stat.icp6s_outhist[ND_NEIGHBOR_ADVERT]))) {
+                do_icmp6_neighbor = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv6.icmpneighbor");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv6", "icmpneighbor", NULL, "icmp", NULL, "IPv6 Neighbor Messages", "messages/s", 10500, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "InSolicits", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutSolicits", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InAdvertisements", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutAdvertisements", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InSolicits", icmp6stat.icp6s_inhist[ND_NEIGHBOR_SOLICIT]);
+                rrddim_set(st, "OutSolicits", icmp6stat.icp6s_outhist[ND_NEIGHBOR_SOLICIT]);
+                rrddim_set(st, "InAdvertisements", icmp6stat.icp6s_inhist[ND_NEIGHBOR_ADVERT]);
+                rrddim_set(st, "OutAdvertisements", icmp6stat.icp6s_outhist[ND_NEIGHBOR_ADVERT]);
+                rrdset_done(st);
+            }
+
+            // --------------------------------------------------------------------
+
+            if (do_icmp6_types == CONFIG_ONDEMAND_YES || (do_icmp6_types == CONFIG_ONDEMAND_ONDEMAND && (
+                                                                    icmp6stat.icp6s_inhist[1] ||
+                                                                    icmp6stat.icp6s_inhist[128] ||
+                                                                    icmp6stat.icp6s_inhist[129] ||
+                                                                    icmp6stat.icp6s_inhist[136] ||
+                                                                    icmp6stat.icp6s_outhist[1] ||
+                                                                    icmp6stat.icp6s_outhist[128] ||
+                                                                    icmp6stat.icp6s_outhist[129] ||
+                                                                    icmp6stat.icp6s_outhist[133] ||
+                                                                    icmp6stat.icp6s_outhist[135] ||
+                                                                    icmp6stat.icp6s_outhist[136]))) {
+                do_icmp6_types = CONFIG_ONDEMAND_YES;
+                st = rrdset_find("ipv6.icmptypes");
+                if (unlikely(!st)) {
+                    st = rrdset_create("ipv6", "icmptypes", NULL, "icmp", NULL, "IPv6 ICMP Types",
+                                       "messages/s", 10700, update_every, RRDSET_TYPE_LINE);
+
+                    rrddim_add(st, "InType1", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InType128", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InType129", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "InType136", NULL, 1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutType1", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutType128", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutType129", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutType133", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutType135", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                    rrddim_add(st, "OutType143", NULL, -1, 1, RRDDIM_INCREMENTAL);
+                } else
+                    rrdset_next(st);
+
+                rrddim_set(st, "InType1", icmp6stat.icp6s_inhist[1]);
+                rrddim_set(st, "InType128", icmp6stat.icp6s_inhist[128]);
+                rrddim_set(st, "InType129", icmp6stat.icp6s_inhist[129]);
+                rrddim_set(st, "InType136", icmp6stat.icp6s_inhist[136]);
+                rrddim_set(st, "OutType1", icmp6stat.icp6s_outhist[1]);
+                rrddim_set(st, "OutType128", icmp6stat.icp6s_outhist[128]);
+                rrddim_set(st, "OutType129", icmp6stat.icp6s_outhist[129]);
+                rrddim_set(st, "OutType133", icmp6stat.icp6s_outhist[133]);
+                rrddim_set(st, "OutType135", icmp6stat.icp6s_outhist[135]);
+                rrddim_set(st, "OutType143", icmp6stat.icp6s_outhist[143]);
+                rrdset_done(st);
+            }
+        }
+    }
+
+    // --------------------------------------------------------------------------
+
+    if (likely(do_space || do_inodes)) {
+        // there is no mount info in sysctl MIBs
+        if (unlikely(!(mntsize = getmntinfo(&mntbuf, MNT_NOWAIT)))) {
+            error("FREEBSD: getmntinfo() failed");
+            do_space = 0;
+            error("DISABLED: disk_space.X");
+            do_inodes = 0;
+            error("DISABLED: disk_inodes.X");
+        } else {
+            for (i = 0; i < mntsize; i++) {
+                if (mntbuf[i].f_flags == MNT_RDONLY ||
+                        mntbuf[i].f_blocks == 0 ||
+                        // taken from gnulib/mountlist.c and shortened to FreeBSD related fstypes
+                        strcmp(mntbuf[i].f_fstypename, "autofs") == 0 ||
+                        strcmp(mntbuf[i].f_fstypename, "procfs") == 0 ||
+                        strcmp(mntbuf[i].f_fstypename, "subfs") == 0 ||
+                        strcmp(mntbuf[i].f_fstypename, "devfs") == 0 ||
+                        strcmp(mntbuf[i].f_fstypename, "none") == 0)
+                    continue;
+
+                // --------------------------------------------------------------------------
+
+                if (likely(do_space)) {
+                    st = rrdset_find_bytype("disk_space", mntbuf[i].f_mntonname);
+                    if (unlikely(!st)) {
+                        snprintfz(title, 4096, "Disk Space Usage for %s [%s]", mntbuf[i].f_mntonname, mntbuf[i].f_mntfromname);
+                        st = rrdset_create("disk_space", mntbuf[i].f_mntonname, NULL, mntbuf[i].f_mntonname, "disk.space", title, "GB", 2023,
+                                           update_every,
+                                           RRDSET_TYPE_STACKED);
+
+                        rrddim_add(st, "avail", NULL, mntbuf[i].f_bsize, GIGA_FACTOR, RRDDIM_ABSOLUTE);
+                        rrddim_add(st, "used", NULL, mntbuf[i].f_bsize, GIGA_FACTOR, RRDDIM_ABSOLUTE);
+                        rrddim_add(st, "reserved_for_root", "reserved for root", mntbuf[i].f_bsize, GIGA_FACTOR,
+                                   RRDDIM_ABSOLUTE);
+                    } else
+                        rrdset_next(st);
+
+                    rrddim_set(st, "avail", (collected_number) mntbuf[i].f_bavail);
+                    rrddim_set(st, "used", (collected_number) (mntbuf[i].f_blocks - mntbuf[i].f_bfree));
+                    rrddim_set(st, "reserved_for_root", (collected_number) (mntbuf[i].f_bfree - mntbuf[i].f_bavail));
+                    rrdset_done(st);
+                }
+
+                // --------------------------------------------------------------------------
+
+                if (likely(do_inodes)) {
+                    st = rrdset_find_bytype("disk_inodes", mntbuf[i].f_mntonname);
+                    if (unlikely(!st)) {
+                        snprintfz(title, 4096, "Disk Files (inodes) Usage for %s [%s]", mntbuf[i].f_mntonname, mntbuf[i].f_mntfromname);
+                        st = rrdset_create("disk_inodes", mntbuf[i].f_mntonname, NULL, mntbuf[i].f_mntonname, "disk.inodes", title, "Inodes", 2024,
+                                           update_every, RRDSET_TYPE_STACKED);
+
+                        rrddim_add(st, "avail", NULL, 1, 1, RRDDIM_ABSOLUTE);
+                        rrddim_add(st, "used", NULL, 1, 1, RRDDIM_ABSOLUTE);
+                        rrddim_add(st, "reserved_for_root", "reserved for root", 1, 1, RRDDIM_ABSOLUTE);
+                    } else
+                        rrdset_next(st);
+
+                    rrddim_set(st, "avail", (collected_number) mntbuf[i].f_ffree);
+                    rrddim_set(st, "used", (collected_number) (mntbuf[i].f_files - mntbuf[i].f_ffree));
+                    rrdset_done(st);
+                }
+            }
+        }
+    }
+
+    // --------------------------------------------------------------------
+
+    if (likely(do_uptime)) {
+        if (unlikely(GETSYSCTL("kern.boottime", boot_time))) {
+            do_uptime = 0;
+            error("DISABLED: system.uptime");
+        } else {
+            clock_gettime(CLOCK_REALTIME, &cur_time);
+            st = rrdset_find("system.uptime");
+
+            if(unlikely(!st)) {
+                st = rrdset_create("system", "uptime", NULL, "uptime", NULL, "System Uptime", "seconds", 1000, update_every, RRDSET_TYPE_LINE);
+                rrddim_add(st, "uptime", NULL, 1, 1, RRDDIM_ABSOLUTE);
+            }
+            else rrdset_next(st);
+
+            rrddim_set(st, "uptime", cur_time.tv_sec - boot_time.tv_sec);
+            rrdset_done(st);
         }
     }
 

@@ -14,14 +14,17 @@
 #  - severity filtering per recipient
 #
 # Supported notification methods:
-#  - emails
-#  - slack.com notifications
-#  - pushover.net notifications
+#  - emails by @ktsaou
+#  - slack.com notifications by @ktsaou
+#  - discordapp.com notifications by @lowfive
+#  - pushover.net notifications by @ktsaou
 #  - pushbullet.com push notifications by Tiago Peralta @tperalta82 PR #1070
 #  - telegram.org notifications by @hashworks PR #1002
 #  - twilio.com notifications by Levi Blaney @shadycuz PR #1211
-#  - kafka notifications
+#  - kafka notifications by @ktsaou #1342
 #  - pagerduty.com notifications by Jim Cooley @jimcooley PR #1373
+#  - messagebird.com notifications by @tech_no_logical #1453
+#  - hipchart notifications by @ktsaou #1561
 
 # -----------------------------------------------------------------------------
 # testing notifications
@@ -44,7 +47,7 @@ then
         echo >&2
         echo >&2 "# SENDING TEST ${x} ALARM TO ROLE: ${recipient}"
 
-        "${0}" "${recipient}" "$(hostname)" 1 1 "${id}" "$(date +%s)" "test_alarm" "test.chart" "test.family" "${x}" "${last}" 100 90 "${0}" 1 $((0 + id)) "units" "this is a test alarm to verify notifications work"
+        "${0}" "${recipient}" "$(hostname)" 1 1 "${id}" "$(date +%s)" "test_alarm" "test.chart" "test.family" "${x}" "${last}" 100 90 "${0}" 1 $((0 + id)) "units" "this is a test alarm to verify notifications work" "new value" "old value"
         if [ $? -ne 0 ]
         then
             echo >&2 "# FAILED"
@@ -136,6 +139,8 @@ duration="${15}"   # the duration in seconds of the previous alarm state
 non_clear_duration="${16}" # the total duration in seconds this is/was non-clear
 units="${17}"      # the units of the value
 info="${18}"       # a short description of the alarm
+value_string="${19}"        # friendly value (with units)
+old_value_string="${20}"    # friendly old value (with units)
 
 # -----------------------------------------------------------------------------
 # screen statuses we don't need to send a notification
@@ -170,8 +175,11 @@ sendmail=
 
 # enable / disable features
 SEND_SLACK="YES"
+SEND_DISCORD="YES"
 SEND_PUSHOVER="YES"
 SEND_TWILIO="YES"
+SEND_HIPCHAT="YES"
+SEND_MESSAGEBIRD="YES"
 SEND_TELEGRAM="YES"
 SEND_EMAIL="YES"
 SEND_PUSHBULLET="YES"
@@ -182,6 +190,11 @@ SEND_PD="YES"
 SLACK_WEBHOOK_URL=
 DEFAULT_RECIPIENT_SLACK=
 declare -A role_recipients_slack=()
+
+# discord configs
+DISCORD_WEBHOOK_URL=
+DEFAULT_RECIPIENT_DISCORD=
+declare -A role_recipients_discord=()
 
 # pushover configs
 PUSHOVER_APP_TOKEN=
@@ -199,6 +212,17 @@ TWILIO_ACCOUNT_TOKEN=
 TWILIO_NUMBER=
 DEFAULT_RECIPIENT_TWILIO=
 declare -A role_recipients_twilio=()
+
+# hipchat configs
+HIPCHAT_AUTH_TOKEN=
+DEFAULT_RECIPIENT_HIPCHAT=
+declare -A role_recipients_hipchat=()
+
+# messagebird configs
+MESSAGEBIRD_ACCESS_KEY=
+MESSAGEBIRD_NUMBER=
+DEFAULT_RECIPIENT_MESSAGEBIRD=
+declare -A role_recipients_messagebird=()
 
 # telegram configs
 TELEGRAM_BOT_TOKEN=
@@ -268,9 +292,11 @@ filter_recipient_by_criticality() {
 # find the recipients' addresses per method
 
 declare -A arr_slack=()
+declare -A arr_discord=()
 declare -A arr_pushover=()
 declare -A arr_pushbullet=()
 declare -A arr_twilio=()
+declare -A arr_hipchat=()
 declare -A arr_telegram=()
 declare -A arr_pd=()
 declare -A arr_email=()
@@ -315,6 +341,22 @@ do
         [ "${r}" != "disabled" ] && filter_recipient_by_criticality twilio "${r}" && arr_twilio[${r/|*/}]="1"
     done
 
+    # hipchat
+    a="${role_recipients_hipchat[${x}]}"
+    [ -z "${a}" ] && a="${DEFAULT_RECIPIENT_HIPCHAT}"
+    for r in ${a//,/ }
+    do
+        [ "${r}" != "disabled" ] && filter_recipient_by_criticality hipchat "${r}" && arr_hipchat[${r/|*/}]="1"
+    done
+
+    # messagebird
+    a="${role_recipients_messagebird[${x}]}"
+    [ -z "${a}" ] && a="${DEFAULT_RECIPIENT_MESSAGEBIRD}"
+    for r in ${a//,/ }
+    do
+        [ "${r}" != "disabled" ] && filter_recipient_by_criticality messagebird "${r}" && arr_messagebird[${r/|*/}]="1"
+    done
+
     # telegram
     a="${role_recipients_telegram[${x}]}"
     [ -z "${a}" ] && a="${DEFAULT_RECIPIENT_TELEGRAM}"
@@ -331,6 +373,14 @@ do
         [ "${r}" != "disabled" ] && filter_recipient_by_criticality slack "${r}" && arr_slack[${r/|*/}]="1"
     done
 
+    # discord
+    a="${role_recipients_discord[${x}]}"
+    [ -z "${a}" ] && a="${DEFAULT_RECIPIENT_DISCORD}"
+    for r in ${a//,/ }
+    do
+        [ "${r}" != "disabled" ] && filter_recipient_by_criticality discord "${r}" && arr_discord[${r/|*/}]="1"
+    done
+
     # pagerduty.com
     a="${role_recipients_pd[${x}]}"
     [ -z "${a}" ] && a="${DEFAULT_RECIPIENT_PD}"
@@ -344,6 +394,10 @@ done
 to_slack="${!arr_slack[*]}"
 [ -z "${to_slack}" ] && SEND_SLACK="NO"
 
+# build the list of discord recipients (channels)
+to_discord="${!arr_discord[*]}"
+[ -z "${to_discord}" ] && SEND_DISCORD="NO"
+
 # build the list of pushover recipients (user tokens)
 to_pushover="${!arr_pushover[*]}"
 [ -z "${to_pushover}" ] && SEND_PUSHOVER="NO"
@@ -355,6 +409,14 @@ to_pushbullet="${!arr_pushbullet[*]}"
 # build the list of twilio recipients (phone numbers)
 to_twilio="${!arr_twilio[*]}"
 [ -z "${to_twilio}" ] && SEND_TWILIO="NO"
+
+# build the list of hipchat recipients (rooms)
+to_hipchat="${!arr_hipchat[*]}"
+[ -z "${to_hipchat}" ] && SEND_HIPCHAT="NO"
+
+# build the list of messagebird recipients (phone numbers)
+to_messagebird="${!arr_messagebird[*]}"
+[ -z "${to_messagebird}" ] && SEND_MESSAGEBIRD="NO"
 
 # check array of telegram recipients (chat ids)
 to_telegram="${!arr_telegram[*]}"
@@ -380,6 +442,9 @@ done
 # check slack
 [ -z "${SLACK_WEBHOOK_URL}" ] && SEND_SLACK="NO"
 
+# check discord
+[ -z "${DISCORD_WEBHOOK_URL}" ] && SEND_DISCORD="NO"
+
 # check pushover
 [ -z "${PUSHOVER_APP_TOKEN}" ] && SEND_PUSHOVER="NO"
 
@@ -388,6 +453,12 @@ done
 
 # check twilio
 [ -z "${TWILIO_ACCOUNT_TOKEN}" -o -z "${TWILIO_ACCOUNT_SID}" -o -z "${TWILIO_NUMBER}" ] && SEND_TWILIO="NO"
+
+# check hipchat
+[ -z "${HIPCHAT_AUTH_TOKEN}" ] && SEND_HIPCHAT="NO"
+
+# check messagebird
+[ -z "${MESSAGEBIRD_ACCESS_KEY}" -o -z "${MESSAGEBIRD_NUMBER}" ] && SEND_MESSAGEBIRD="NO"
 
 # check telegram
 [ -z "${TELEGRAM_BOT_TOKEN}" ] && SEND_TELEGRAM="NO"
@@ -410,7 +481,17 @@ if [ "${SEND_PD}" = "YES" ]
 fi
 
 # if we need curl, check for the curl command
-if [ \( "${SEND_PUSHOVER}" = "YES" -o "${SEND_SLACK}" = "YES" -o "${SEND_TWILIO}" = "YES" -o "${SEND_TELEGRAM}" = "YES" -o "${SEND_PUSHBULLET}" = "YES" -o "${SEND_KAFKA}" = "YES" \) -a -z "${curl}" ]
+if [ \( \
+           "${SEND_PUSHOVER}"    = "YES" \
+        -o "${SEND_SLACK}"       = "YES" \
+        -o "${SEND_DISCORD}"       = "YES" \
+        -o "${SEND_HIPCHAT}"     = "YES" \
+        -o "${SEND_TWILIO}"      = "YES" \
+        -o "${SEND_MESSAGEBIRD}" = "YES" \
+        -o "${SEND_TELEGRAM}"    = "YES" \
+        -o "${SEND_PUSHBULLET}"  = "YES" \
+        -o "${SEND_KAFKA}"       = "YES" \
+    \) -a -z "${curl}" ]
     then
     curl="$(which curl 2>/dev/null || command -v curl 2>/dev/null)"
     if [ -z "${curl}" ]
@@ -421,7 +502,10 @@ if [ \( "${SEND_PUSHOVER}" = "YES" -o "${SEND_SLACK}" = "YES" -o "${SEND_TWILIO}
         SEND_PUSHBULLET="NO"
         SEND_TELEGRAM="NO"
         SEND_SLACK="NO"
+        SEND_DISCORD="NO"
         SEND_TWILIO="NO"
+        SEND_HIPCHAT="NO"
+        SEND_MESSAGEBIRD="NO"
         SEND_KAFKA="NO"
     fi
 fi
@@ -434,14 +518,17 @@ if [ "${SEND_EMAIL}" = "YES" -a -z "${sendmail}" ]
 fi
 
 # check that we have at least a method enabled
-if [   "${SEND_EMAIL}"      != "YES" \
-    -a "${SEND_PUSHOVER}"   != "YES" \
-    -a "${SEND_TELEGRAM}"   != "YES" \
-    -a "${SEND_SLACK}"      != "YES" \
-    -a "${SEND_TWILIO}"     != "YES" \
-    -a "${SEND_PUSHBULLET}" != "YES" \
-    -a "${SEND_KAFKA}"      != "YES" \
-    -a "${SEND_PD}"         != "YES" \
+if [   "${SEND_EMAIL}"          != "YES" \
+    -a "${SEND_PUSHOVER}"       != "YES" \
+    -a "${SEND_TELEGRAM}"       != "YES" \
+    -a "${SEND_SLACK}"          != "YES" \
+    -a "${SEND_DISCORD}"          != "YES" \
+    -a "${SEND_TWILIO}"         != "YES" \
+    -a "${SEND_HIPCHAT}"        != "YES" \
+    -a "${SEND_MESSAGEBIRD}"    != "YES" \
+    -a "${SEND_PUSHBULLET}"     != "YES" \
+    -a "${SEND_KAFKA}"          != "YES" \
+    -a "${SEND_PD}"             != "YES" \
     ]
     then
     fatal "All notification methods are disabled. Not sending notification to '${roles}' for '${name}' = '${value}' of chart '${chart}' for status '${status}'."
@@ -688,13 +775,13 @@ send_pd() {
         then
         for PD_SERVICE_KEY in ${recipients}
         do
-            d="${status} ${name}=${value} ${units} - ${host}, ${family}"
+            d="${status} ${name} = ${value_string} - ${host}, ${family}"
             ${pd_send} -k ${PD_SERVICE_KEY} \
                        -t ${t} \
                        -d "${d}" \
                        -i ${alarm_id} \
                        -f 'info'="${info}" \
-                       -f 'value_w_units'="${value} ${units}" \
+                       -f 'value_w_units'="${value_string}" \
                        -f 'when'="${when}" \
                        -f 'duration'="${duration}" \
                        -f 'roles'="${roles}" \
@@ -751,6 +838,94 @@ send_twilio() {
                 sent=$((sent + 1))
             else
                 error "failed to send Twilio SMS for: ${host} ${chart}.${name} is ${status} to '${user}' with HTTP error code ${httpcode}."
+            fi
+        done
+
+        [ ${sent} -gt 0 ] && return 0
+    fi
+
+    return 1
+}
+
+
+# -----------------------------------------------------------------------------
+# hipchat sender
+
+send_hipchat() {
+    local authtoken="${1}" recipients="${2}" message="${3}" httpcode sent=0 room color sender msg_format notify
+
+    if [ "${SEND_HIPCHAT}" = "YES" -a ! -z "${authtoken}" -a ! -z "${recipients}" -a ! -z "${message}" ]
+        then
+
+        # A label to be shown in addition to the sender's name
+        # Valid length range: 0 - 64. 
+        sender="netdata"
+
+        # Valid values: html, text.
+        # Defaults to 'html'.
+        msg_format="text"
+
+        # Background color for message. Valid values: yellow, green, red, purple, gray, random. Defaults to 'yellow'.
+        case "${status}" in
+            WARNING)  color="yellow" ;;
+            CRITICAL) color="red" ;;
+            CLEAR)    color="green" ;;
+            *)        color="gray" ;;
+        esac
+
+        # Whether this message should trigger a user notification (change the tab color, play a sound, notify mobile phones, etc).
+        # Each recipient's notification preferences are taken into account.
+        # Defaults to false.
+        notify="true"
+
+        for room in ${recipients}
+        do
+            httpcode=$(${curl} -X POST --write-out %{http_code} --silent --output /dev/null \
+                    -H "Content-type: application/json" \
+                    -H "Authorization: Bearer ${authtoken}" \
+                    -d "{\"color\": \"${color}\", \"from\": \"${netdata}\", \"message_format\": \"${msg_format}\", \"message\": \"${message}\", \"notify\": \"${notify}\"}" \
+                    "https://api.hipchat.com/v2/room/${room}/notification")
+
+            if [ "${httpcode}" == "200" ]
+            then
+                info "sent HipChat notification for: ${host} ${chart}.${name} is ${status} to '${room}'"
+                sent=$((sent + 1))
+            else
+                error "failed to send HipChat notification for: ${host} ${chart}.${name} is ${status} to '${room}' with HTTP error code ${httpcode}."
+            fi
+        done
+
+        [ ${sent} -gt 0 ] && return 0
+    fi
+
+    return 1
+}
+
+
+# -----------------------------------------------------------------------------
+# messagebird sender
+
+send_messagebird() {
+    local accesskey="${1}" messagebirdnumber="${2}" recipients="${3}"  title="${4}" message="${5}" httpcode sent=0 user
+    if [ "${SEND_MESSAGEBIRD}" = "YES" -a ! -z "${accesskey}" -a ! -z "${messagebirdnumber}" -a ! -z "${recipients}" -a ! -z "${message}" -a ! -z "${title}" ]
+        then
+        #https://developers.messagebird.com/docs/messaging
+        for user in ${recipients}
+        do
+            httpcode=$(${curl} -X POST --write-out %{http_code} --silent --output /dev/null \
+                --data-urlencode "originator=${messagebirdnumber}" \
+                --data-urlencode "recipients=${user}" \
+                --data-urlencode "body=${title} ${message}" \
+		        --data-urlencode "datacoding=auto" \
+                -H "Authorization: AccessKey ${accesskey}" \
+                "https://rest.messagebird.com/messages")
+
+            if [ "${httpcode}" == "201" ]
+            then
+                info "sent Messagebird SMS for: ${host} ${chart}.${name} is ${status} to '${user}'"
+                sent=$((sent + 1))
+            else
+                error "failed to send Messagebird SMS for: ${host} ${chart}.${name} is ${status} to '${user}' with HTTP error code ${httpcode}."
             fi
         done
 
@@ -861,6 +1036,66 @@ EOF
     return 1
 }
 
+# -----------------------------------------------------------------------------
+# discord sender
+
+send_discord() {
+    local webhook="${1}/slack" channels="${2}" httpcode sent=0 channel color payload
+
+    [ "${SEND_DISCORD}" != "YES" ] && return 1
+
+    case "${status}" in
+        WARNING)  color="warning" ;;
+        CRITICAL) color="danger" ;;
+        CLEAR)    color="good" ;;
+        *)        color="#777777" ;;
+    esac
+
+    for channel in ${channels}
+    do
+        payload="$(cat <<EOF
+        {
+            "channel": "#${channel}",
+            "username": "netdata on ${host}",
+            "text": "${host} ${status_message}, \`${chart}\` (_${family}_), *${alarm}*",
+            "icon_url": "${images_base_url}/images/seo-performance-128.png",
+            "attachments": [
+                {
+                    "color": "${color}",
+                    "title": "${alarm}",
+                    "title_link": "${goto_url}",
+                    "text": "${info}",
+                    "fields": [
+                        {
+                            "title": "${chart}",
+                            "value": "${family}"
+                        }
+                    ],
+                    "thumb_url": "${image}",
+                    "footer_icon": "${images_base_url}/images/seo-performance-128.png",
+                    "footer": "${host}",
+                    "ts": ${when}
+                }
+            ]
+        }
+EOF
+        )"
+
+        httpcode=$(${curl} --write-out %{http_code} --silent --output /dev/null -X POST --data-urlencode "payload=${payload}" "${webhook}")
+        if [ "${httpcode}" == "200" ]
+        then
+            info "sent discord notification for: ${host} ${chart}.${name} is ${status} to '${channel}'"
+            sent=$((sent + 1))
+        else
+            error "failed to send discord notification for: ${host} ${chart}.${name} is ${status} to '${channel}', with HTTP error code ${httpcode}."
+        fi
+    done
+
+    [ ${sent} -gt 0 ] && return 0
+
+    return 1
+}
+
 
 # -----------------------------------------------------------------------------
 # prepare the content of the notification
@@ -887,7 +1122,7 @@ status_message="status unknown"
 color="grey"
 
 # the alarm value
-alarm="${name//_/ } = ${value} ${units}"
+alarm="${name//_/ } = ${value_string}"
 
 # the image of the alarm
 image="${images_base_url}/images/seo-performance-128.png"
@@ -962,6 +1197,15 @@ send_slack "${SLACK_WEBHOOK_URL}" "${to_slack}"
 SENT_SLACK=$?
 
 # -----------------------------------------------------------------------------
+# send the discord notification
+
+# discord aggregates posts from the same username
+# so we use "${host} ${status}" as the bot username, to make them diff
+
+send_discord "${DISCORD_WEBHOOK_URL}" "${to_discord}"
+SENT_DISCORD=$?
+
+# -----------------------------------------------------------------------------
 # send the pushover notification
 
 send_pushover "${PUSHOVER_APP_TOKEN}" "${to_pushover}" "${when}" "${goto_url}" "${status}" "${host} ${status_message} - ${name//_/ } - ${chart}" "
@@ -1000,6 +1244,18 @@ ${info}"
 SENT_TWILIO=$?
 
 # -----------------------------------------------------------------------------
+# send the messagebird SMS
+
+send_messagebird "${MESSAGEBIRD_ACCESS_KEY}" "${MESSAGEBIRD_NUMBER}" "${to_messagebird}" "${host} ${status_message} - ${name//_/ } - ${chart}" "${alarm} 
+Severity: ${severity}
+Chart: ${chart}
+Family: ${family}
+${info}"
+
+SENT_MESSAGEBIRD=$?
+
+
+# -----------------------------------------------------------------------------
 # send the telegram.org message
 
 # https://core.telegram.org/bots/api#formatting-options
@@ -1024,6 +1280,21 @@ SENT_KAFKA=$?
 send_pd "${to_pd}"
 SENT_PD=$?
 
+
+# -----------------------------------------------------------------------------
+# send hipchat message
+
+send_hipchat "${HIPCHAT_AUTH_TOKEN}" "${to_hipchat}" "
+<b>${alarm}</b> ${info_html}<br/>&nbsp;
+<small><b>${chart}</b><br/>Chart<br/>&nbsp;</small>
+<small><b>${family}</b><br/>Family<br/>&nbsp;</small>
+<small><b>${severity}</b><br/>Severity<br/>&nbsp;</small>
+<small><b>${date}${raised_for_html}</b><br/>Time<br/>&nbsp;</small>
+<a href=\"${goto_url}\">View Netdata</a><br/>&nbsp;
+<small><small>The source of this alarm is line ${src}</small></small>
+"
+
+SENT_HIPCHAT=$?
 
 # -----------------------------------------------------------------------------
 # send the email
@@ -1123,14 +1394,17 @@ SENT_EMAIL=$?
 # -----------------------------------------------------------------------------
 # let netdata know
 
-if [   ${SENT_EMAIL}      -eq 0 \
-    -o ${SENT_PUSHOVER}   -eq 0 \
-    -o ${SENT_TELEGRAM}   -eq 0 \
-    -o ${SENT_SLACK}      -eq 0 \
-    -o ${SENT_TWILIO}     -eq 0 \
-    -o ${SENT_PUSHBULLET} -eq 0 \
-    -o ${SENT_KAFKA}      -eq 0 \
-    -o ${SENT_PD}         -eq 0 \
+if [   ${SENT_EMAIL}        -eq 0 \
+    -o ${SENT_PUSHOVER}     -eq 0 \
+    -o ${SENT_TELEGRAM}     -eq 0 \
+    -o ${SENT_SLACK}        -eq 0 \
+    -o ${SENT_DISCORD}      -eq 0 \
+    -o ${SENT_TWILIO}       -eq 0 \
+    -o ${SENT_HIPCHAT}      -eq 0 \
+    -o ${SENT_MESSAGEBIRD}  -eq 0 \
+    -o ${SENT_PUSHBULLET}   -eq 0 \
+    -o ${SENT_KAFKA}        -eq 0 \
+    -o ${SENT_PD}           -eq 0 \
     ]
     then
     # we did send something
@@ -1139,3 +1413,4 @@ fi
 
 # we did not send anything
 exit 1
+

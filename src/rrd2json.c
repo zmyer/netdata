@@ -85,10 +85,12 @@ void rrd_stats_api_v1_charts(BUFFER *wb)
 
     buffer_sprintf(wb, "{\n"
            "\t\"hostname\": \"%s\""
+        ",\n\t\"os\": \"%s\""
         ",\n\t\"update_every\": %d"
         ",\n\t\"history\": %d"
         ",\n\t\"charts\": {"
         , localhost.hostname
+        , os_type
         , rrd_update_every
         , rrd_default_history_entries
         );
@@ -107,7 +109,8 @@ void rrd_stats_api_v1_charts(BUFFER *wb)
 
     RRDCALC *rc;
     for(rc = localhost.alarms; rc ; rc = rc->next) {
-        alarms++;
+        if(rc->rrdset)
+            alarms++;
     }
     pthread_rwlock_unlock(&localhost.rrdset_root_rwlock);
 
@@ -124,6 +127,173 @@ void rrd_stats_api_v1_charts(BUFFER *wb)
     );
 }
 
+// ----------------------------------------------------------------------------
+// PROMETHEUS
+// /api/v1/allmetrics?format=prometheus
+
+static inline size_t prometheus_name_copy(char *d, const char *s, size_t usable) {
+    size_t n;
+
+    for(n = 0; *s && n < usable ; d++, s++, n++) {
+        register char c = *s;
+
+        if(unlikely(!isalnum(c))) *d = '_';
+        else *d = c;
+    }
+    *d = '\0';
+
+    return n;
+}
+
+#define PROMETHEUS_ELEMENT_MAX 256
+
+void rrd_stats_api_v1_charts_allmetrics_prometheus(BUFFER *wb)
+{
+    pthread_rwlock_rdlock(&localhost.rrdset_root_rwlock);
+
+    char host[PROMETHEUS_ELEMENT_MAX + 1];
+    prometheus_name_copy(host, config_get("global", "hostname", "localhost"), PROMETHEUS_ELEMENT_MAX);
+
+    // for each chart
+    RRDSET *st;
+    for(st = localhost.rrdset_root; st ; st = st->next) {
+        char chart[PROMETHEUS_ELEMENT_MAX + 1];
+        prometheus_name_copy(chart, st->id, PROMETHEUS_ELEMENT_MAX);
+
+        buffer_strcat(wb, "\n");
+        if(st->enabled && st->dimensions) {
+            pthread_rwlock_rdlock(&st->rwlock);
+
+            // for each dimension
+            RRDDIM *rd;
+            for(rd = st->dimensions; rd ; rd = rd->next) {
+                if(rd->counter) {
+                    char dimension[PROMETHEUS_ELEMENT_MAX + 1];
+                    prometheus_name_copy(dimension, rd->id, PROMETHEUS_ELEMENT_MAX);
+
+                    // buffer_sprintf(wb, "# HELP %s.%s %s\n", st->id, rd->id, st->units);
+
+                    switch(rd->algorithm) {
+                        case RRDDIM_INCREMENTAL:
+                        case RRDDIM_PCENT_OVER_DIFF_TOTAL:
+                            buffer_sprintf(wb, "# TYPE %s_%s counter\n", chart, dimension);
+                            break;
+
+                        default:
+                            buffer_sprintf(wb, "# TYPE %s_%s gauge\n", chart, dimension);
+                            break;
+                    }
+
+                    // calculated_number n = (calculated_number)rd->last_collected_value * (calculated_number)(abs(rd->multiplier)) / (calculated_number)(abs(rd->divisor));
+                    // buffer_sprintf(wb, "%s.%s " CALCULATED_NUMBER_FORMAT " %llu\n", st->id, rd->id, n,
+                    //        (unsigned long long)((rd->last_collected_time.tv_sec * 1000) + (rd->last_collected_time.tv_usec / 1000)));
+
+                    buffer_sprintf(wb, "%s_%s{instance=\"%s\"} " COLLECTED_NUMBER_FORMAT " %llu\n",
+                            chart, dimension, host, rd->last_collected_value,
+                            (unsigned long long)((rd->last_collected_time.tv_sec * 1000) + (rd->last_collected_time.tv_usec / 1000)));
+
+                }
+            }
+
+            pthread_rwlock_unlock(&st->rwlock);
+        }
+    }
+
+    pthread_rwlock_unlock(&localhost.rrdset_root_rwlock);
+}
+
+// ----------------------------------------------------------------------------
+// BASH
+// /api/v1/allmetrics?format=bash
+
+static inline size_t shell_name_copy(char *d, const char *s, size_t usable) {
+    size_t n;
+
+    for(n = 0; *s && n < usable ; d++, s++, n++) {
+        register char c = *s;
+
+        if(unlikely(!isalnum(c))) *d = '_';
+        else *d = (char)toupper(c);
+    }
+    *d = '\0';
+
+    return n;
+}
+
+#define SHELL_ELEMENT_MAX 100
+
+void rrd_stats_api_v1_charts_allmetrics_shell(BUFFER *wb)
+{
+    pthread_rwlock_rdlock(&localhost.rrdset_root_rwlock);
+
+    char host[SHELL_ELEMENT_MAX + 1];
+    shell_name_copy(host, config_get("global", "hostname", "localhost"), SHELL_ELEMENT_MAX);
+
+    // for each chart
+    RRDSET *st;
+    for(st = localhost.rrdset_root; st ; st = st->next) {
+        calculated_number total = 0.0;
+        char chart[SHELL_ELEMENT_MAX + 1];
+        shell_name_copy(chart, st->id, SHELL_ELEMENT_MAX);
+
+        buffer_sprintf(wb, "\n# chart: %s (name: %s)\n", st->id, st->name);
+        if(st->enabled && st->dimensions) {
+            pthread_rwlock_rdlock(&st->rwlock);
+
+            // for each dimension
+            RRDDIM *rd;
+            for(rd = st->dimensions; rd ; rd = rd->next) {
+                if(rd->counter) {
+                    char dimension[SHELL_ELEMENT_MAX + 1];
+                    shell_name_copy(dimension, rd->id, SHELL_ELEMENT_MAX);
+
+                    calculated_number n = rd->last_stored_value;
+
+                    if(isnan(n) || isinf(n))
+                        buffer_sprintf(wb, "NETDATA_%s_%s=\"\"      # %s\n", chart, dimension, st->units);
+                    else {
+                        if(rd->multiplier < 0 || rd->divisor < 0) n = -n;
+                        n = roundl(n);
+                        if(!(rd->flags & RRDDIM_FLAG_HIDDEN)) total += n;
+                        buffer_sprintf(wb, "NETDATA_%s_%s=\"%0.0Lf\"      # %s\n", chart, dimension, n, st->units);
+                    }
+                }
+            }
+
+            total = roundl(total);
+            buffer_sprintf(wb, "NETDATA_%s_VISIBLETOTAL=\"%0.0Lf\"      # %s\n", chart, total, st->units);
+            pthread_rwlock_unlock(&st->rwlock);
+        }
+    }
+
+    buffer_strcat(wb, "\n# NETDATA ALARMS RUNNING\n");
+
+    RRDCALC *rc;
+    for(rc = localhost.alarms; rc ;rc = rc->next) {
+        if(!rc->rrdset) continue;
+
+        char chart[SHELL_ELEMENT_MAX + 1];
+        shell_name_copy(chart, rc->rrdset->id, SHELL_ELEMENT_MAX);
+
+        char alarm[SHELL_ELEMENT_MAX + 1];
+        shell_name_copy(alarm, rc->name, SHELL_ELEMENT_MAX);
+
+        calculated_number n = rc->value;
+
+        if(isnan(n) || isinf(n))
+            buffer_sprintf(wb, "NETDATA_ALARM_%s_%s_VALUE=\"\"      # %s\n", chart, alarm, rc->units);
+        else {
+            n = roundl(n);
+            buffer_sprintf(wb, "NETDATA_ALARM_%s_%s_VALUE=\"%0.0Lf\"      # %s\n", chart, alarm, n, rc->units);
+        }
+
+        buffer_sprintf(wb, "NETDATA_ALARM_%s_%s_STATUS=\"%s\"\n", chart, alarm, rrdcalc_status2string(rc->status));
+    }
+
+    pthread_rwlock_unlock(&localhost.rrdset_root_rwlock);
+}
+
+// ----------------------------------------------------------------------------
 
 unsigned long rrd_stats_one_json(RRDSET *st, char *options, BUFFER *wb)
 {
@@ -281,6 +451,7 @@ void rrd_stats_all_json(BUFFER *wb)
 #define RRDR_RESET      0x02 // the dimension contains / the value is reset
 #define RRDR_HIDDEN     0x04 // the dimension contains / the value is hidden
 #define RRDR_NONZERO    0x08 // the dimension contains / the value is non-zero
+#define RRDR_SELECTED   0x10 // the dimension is selected
 
 // RRDR result options
 #define RRDR_RESULT_OPTION_ABSOLUTE 0x00000001
@@ -373,13 +544,15 @@ static void rrdr_dump(RRDR *r)
 }
 */
 
-void rrdr_disable_not_selected_dimensions(RRDR *r, const char *dims)
+void rrdr_disable_not_selected_dimensions(RRDR *r, uint32_t options, const char *dims)
 {
+    if(unlikely(!dims || !*dims)) return;
+
     char b[strlen(dims) + 1];
     char *o = b, *tok;
     strcpy(o, dims);
 
-    long c;
+    long c, dims_selected = 0, dims_not_hidden_not_zero = 0;
     RRDDIM *d;
 
     // disable all of them
@@ -394,14 +567,36 @@ void rrdr_disable_not_selected_dimensions(RRDR *r, const char *dims)
         // find it and enable it
         for(c = 0, d = r->st->dimensions; d ;c++, d = d->next) {
             if(unlikely((hash == d->hash && !strcmp(d->id, tok)) || !strcmp(d->name, tok))) {
-                r->od[c] &= ~RRDR_HIDDEN;
+
+                if(likely(r->od[c] & RRDR_HIDDEN)) {
+                    r->od[c] |= RRDR_SELECTED;
+                    r->od[c] &= ~RRDR_HIDDEN;
+                    dims_selected++;
+                }
 
                 // since the user needs this dimension
                 // make it appear as NONZERO, to return it
                 // even if the dimension has only zeros
-                r->od[c] |= RRDR_NONZERO;
+                // unless option non_zero is set
+                if(likely(!(options & RRDR_OPTION_NONZERO)))
+                    r->od[c] |= RRDR_NONZERO;
+
+                // count the visible dimensions
+                if(likely(r->od[c] & RRDR_NONZERO))
+                    dims_not_hidden_not_zero++;
             }
         }
+    }
+
+    // check if all dimensions are hidden
+    if(unlikely(!dims_not_hidden_not_zero && dims_selected)) {
+        // there are a few selected dimensions
+        // but they are all zero
+        // enable the selected ones
+        // to avoid returning an empty chart
+        for(c = 0, d = r->st->dimensions; d ;c++, d = d->next)
+            if(unlikely(r->od[c] & RRDR_SELECTED))
+                r->od[c] |= RRDR_NONZERO;
     }
 }
 
@@ -456,17 +651,21 @@ void rrdr_buffer_print_format(BUFFER *wb, uint32_t format)
 
 uint32_t rrdr_check_options(RRDR *r, uint32_t options, const char *dims)
 {
+    (void)dims;
+
     if(options & RRDR_OPTION_NONZERO) {
         long i;
 
-        if(dims && *dims) {
+        // commented due to #1514
+
+        //if(dims && *dims) {
             // the caller wants specific dimensions
             // disable NONZERO option
             // to make sure we don't accidentally prevent
             // the specific dimensions from being returned
-            i = 0;
-        }
-        else {
+            // i = 0;
+        //}
+        //else {
             // find how many dimensions are not zero
             long c;
             RRDDIM *rd;
@@ -475,7 +674,7 @@ uint32_t rrdr_check_options(RRDR *r, uint32_t options, const char *dims)
                 if(unlikely(!(r->od[c] & RRDR_NONZERO))) continue;
                 i++;
             }
-        }
+        //}
 
         // if with nonzero we get i = 0 (no dimensions will be returned)
         // disable nonzero to show all dimensions
@@ -721,13 +920,13 @@ static void rrdr2json(RRDR *r, BUFFER *wb, uint32_t options, int datatable)
     else {
         kq[0] = '"';
         sq[0] = '"';
-        if((options & RRDR_OPTION_SECONDS) || (options & RRDR_OPTION_MILLISECONDS)) {
-            dates = JSON_DATES_TIMESTAMP;
-            dates_with_new = 0;
-        }
-        else {
+        if(options & RRDR_OPTION_GOOGLE_JSON) {
             dates = JSON_DATES_JS;
             dates_with_new = 1;
+        }
+        else {
+            dates = JSON_DATES_TIMESTAMP;
+            dates_with_new = 0;
         }
         if( options & RRDR_OPTION_OBJECTSROWS )
             strcpy(pre_date, "      { ");
@@ -1606,7 +1805,7 @@ int rrd2value(RRDSET *st, BUFFER *wb, calculated_number *n, const char *dimensio
     options = rrdr_check_options(r, options, dimensions);
 
     if(dimensions)
-        rrdr_disable_not_selected_dimensions(r, dimensions);
+        rrdr_disable_not_selected_dimensions(r, options, dimensions);
 
     if(db_after)  *db_after  = r->after;
     if(db_before) *db_before = r->before;
@@ -1634,7 +1833,7 @@ int rrd2format(RRDSET *st, BUFFER *wb, BUFFER *dimensions, uint32_t format, long
     options = rrdr_check_options(r, options, (dimensions)?buffer_tostring(dimensions):NULL);
 
     if(dimensions)
-        rrdr_disable_not_selected_dimensions(r, buffer_tostring(dimensions));
+        rrdr_disable_not_selected_dimensions(r, options, buffer_tostring(dimensions));
 
     if(latest_timestamp && rrdr_rows(r) > 0)
         *latest_timestamp = r->before;
@@ -2108,7 +2307,7 @@ time_t rrd_stats_json(int type, RRDSET *st, BUFFER *wb, long points, long group,
 
     } // max_loop
 
-    debug(D_RRD_STATS, "RRD_STATS_JSON: %s total %lu bytes", st->name, wb->len);
+    debug(D_RRD_STATS, "RRD_STATS_JSON: %s total %zu bytes", st->name, wb->len);
 
     pthread_rwlock_unlock(&st->rwlock);
     return last_timestamp;

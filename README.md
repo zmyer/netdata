@@ -1,5 +1,4 @@
-# netdata [![Build Status](https://travis-ci.org/firehol/netdata.svg?branch=master)](https://travis-ci.org/firehol/netdata) [![Coverity Scan Build Status](https://scan.coverity.com/projects/9140/badge.svg)](https://scan.coverity.com/projects/firehol-netdata) [![Docker Pulls](https://img.shields.io/docker/pulls/titpetric/netdata.svg)](https://hub.docker.com/r/titpetric/netdata/)
-
+# netdata [![Build Status](https://travis-ci.org/firehol/netdata.svg?branch=master)](https://travis-ci.org/firehol/netdata) [![Coverity Scan Build Status](https://scan.coverity.com/projects/9140/badge.svg)](https://scan.coverity.com/projects/firehol-netdata) [![Codacy Badge](https://api.codacy.com/project/badge/Grade/a994873f30d045b9b4b83606c3eb3498)](https://www.codacy.com/app/netdata/netdata?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=firehol/netdata&amp;utm_campaign=Badge_Grade) [![Code Climate](https://codeclimate.com/github/firehol/netdata/badges/gpa.svg)](https://codeclimate.com/github/firehol/netdata) [![Docker Pulls](https://img.shields.io/docker/pulls/titpetric/netdata.svg)](https://hub.docker.com/r/titpetric/netdata/)
 > *New to netdata? Here is a live demo: [http://my-netdata.io](http://my-netdata.io)*
 
 **netdata** is a system for **distributed real-time performance and health monitoring**.
@@ -26,16 +25,20 @@ disrupting their core function._
 ## News
 
 <p align="center">
-<a href="https://octoverse.github.com/" target="_blank"><img src="https://cloud.githubusercontent.com/assets/2662304/18795170/ec321f32-81cb-11e6-92a8-d03492f0b00d.png"/></a>
+Netdata is featured at <b><a href="https://octoverse.github.com/" target="_blank">GitHub's State Of The Octoverse 2016</a></b><br/>
+<a href="https://octoverse.github.com/" target="_blank"><img src="https://cloud.githubusercontent.com/assets/2662304/21743260/23ebe62c-d507-11e6-80c0-76b95f53e464.png"/></a>
 </p>
 
-`Oct 4th, 2016` - **[netdata v1.4.0 released!](https://github.com/firehol/netdata/releases)**
+`Jan 22nd, 2017` - **[netdata v1.5.0 released!](https://github.com/firehol/netdata/releases)**
 
- - the **fastest** netdata ever (with a better look too)
- - improved **IoT** and **containers** support
- - **alarms** improved in almost every way
- - new plugins: softnet netdev, extended TCP metrics, UDPLite, NFS v2, v3 client (server was there already), NFS v4 server & client, APCUPSd, RetroShare
- - improved plugins: mysql, cgroups, hddtemp, sensors, phpfm, tc (QoS)
+ - netdata now runs on **FreeBSD** and **MacOS**
+ - netdata now supports **Graphite**, **OpenTSDB**, **Prometheus** and compatible backends
+ - netdata now monitors **systemd Services**
+ - new plugins: fping, postgres, varnish, elasticsearch, haproxy, freeradius, mdstat, ISC dhcpd, fail2ban, openvpn, NUMA memory, CPU Idle States, gunicorn, ECC memory errors, IPC semaphores, uptime
+ - improved plugins: netfilter conntrack, mysql/mariadb, ipfs, cpufreq, hddtemp, sensors, nginx, nginx_log, phpfpm, redis, dovecot, containers and cgroups, disk space, apps.plugin, tc (QoS) and almost all internal plugins (memory, IPv4 and IPv6, network interfaces, QoS, etc)
+ - dozens of new and improved alarms (including performance monitoring alarms for mysql)
+ - new alarm notifications: messagebird.com, pagerduty.com, pushbullet.com, twilio.com, hipchat, kafka
+ - dozens more improvements and performance optimizations
 
 ---
 
@@ -54,12 +57,12 @@ disrupting their core function._
    
  - **Highly efficient**<br/>
    collects thousands of metrics per server per second,
-   with just 1% CPU utilization of a single core, a few MB or RAM and no disk I/O at all
+   with just 1% CPU utilization of a single core, a few MB of RAM and no disk I/O at all
    
  - **Sophisticated alarming**<br/>
    supports dynamic thresholds, hysteresis, alarm templates,
    multiple role-based notification methods (such as email, slack.com,
-   pushover.net, pushbullet.com telegram.org, twilio.com)
+   pushover.net, pushbullet.com telegram.org, twilio.com, messagebird.com)
    
  - **Extensible**<br/>
    you can monitor anything you can get a metric for,
@@ -107,7 +110,7 @@ This is a list of what it currently monitors:
   usage, interrupts, softirqs, frequency, total and per core
 
 - **Memory**<br/>
-  RAM, swap and kernel memory usage, including KSM the kernel memory deduper
+  RAM, swap and kernel memory usage, KSM (Kernel Samepage Merging), NUMA
 
 - **Disks**<br/>
   per disk: I/O, operations, backlog, utilization, space

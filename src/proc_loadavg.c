@@ -4,20 +4,19 @@
 #define MIN_LOADAVG_UPDATE_EVERY 5
 
 int do_proc_loadavg(int update_every, usec_t dt) {
-    (void)dt;
-
     static procfile *ff = NULL;
     static int do_loadavg = -1, do_all_processes = -1;
-    static usec_t last_loadavg_usec = 0;
+    static usec_t next_loadavg_dt = 0;
     static RRDSET *load_chart = NULL, *processes_chart = NULL;
 
     if(unlikely(!ff)) {
         char filename[FILENAME_MAX + 1];
         snprintfz(filename, FILENAME_MAX, "%s%s", global_host_prefix, "/proc/loadavg");
+
         ff = procfile_open(config_get("plugin:proc:/proc/loadavg", "filename to monitor", filename), " \t,:|/", PROCFILE_FLAG_DEFAULT);
+        if(unlikely(!ff))
+            return 1;
     }
-    if(unlikely(!ff))
-        return 1;
 
     ff = procfile_readall(ff);
     if(unlikely(!ff))
@@ -41,14 +40,14 @@ int do_proc_loadavg(int update_every, usec_t dt) {
     double load5 = strtod(procfile_lineword(ff, 0, 1), NULL);
     double load15 = strtod(procfile_lineword(ff, 0, 2), NULL);
 
-    //unsigned long long running_processes  = strtoull(procfile_lineword(ff, 0, 3), NULL, 10);
-    unsigned long long active_processes     = strtoull(procfile_lineword(ff, 0, 4), NULL, 10);
-    //unsigned long long next_pid           = strtoull(procfile_lineword(ff, 0, 5), NULL, 10);
+    //unsigned long long running_processes  = str2ull(procfile_lineword(ff, 0, 3));
+    unsigned long long active_processes     = str2ull(procfile_lineword(ff, 0, 4));
+    //unsigned long long next_pid           = str2ull(procfile_lineword(ff, 0, 5));
 
 
     // --------------------------------------------------------------------
 
-    if(last_loadavg_usec <= dt) {
+    if(next_loadavg_dt <= dt) {
         if(likely(do_loadavg)) {
             if(unlikely(!load_chart)) {
                 load_chart = rrdset_find_byname("system.load");
@@ -68,9 +67,9 @@ int do_proc_loadavg(int update_every, usec_t dt) {
             rrdset_done(load_chart);
         }
 
-        last_loadavg_usec = load_chart->update_every * USEC_PER_SEC;
+        next_loadavg_dt = load_chart->update_every * USEC_PER_SEC;
     }
-    else last_loadavg_usec -= dt;
+    else next_loadavg_dt -= dt;
 
     // --------------------------------------------------------------------
 

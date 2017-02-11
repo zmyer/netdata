@@ -251,44 +251,50 @@ static inline ssize_t health_alarm_log_read(RRDHOST *host, FILE *fp, const char 
             ae->exec_run_timestamp      = (uint32_t)strtoul(pointers[11], NULL, 16);
             ae->delay_up_to_timestamp   = (uint32_t)strtoul(pointers[12], NULL, 16);
 
-            if(unlikely(ae->name)) freez(ae->name);
+            freez(ae->name);
             ae->name = strdupz(pointers[13]);
             ae->hash_name = simple_hash(ae->name);
 
-            if(unlikely(ae->chart)) freez(ae->chart);
+            freez(ae->chart);
             ae->chart = strdupz(pointers[14]);
             ae->hash_chart = simple_hash(ae->chart);
 
-            if(unlikely(ae->family)) freez(ae->family);
+            freez(ae->family);
             ae->family = strdupz(pointers[15]);
 
-            if(unlikely(ae->exec)) freez(ae->exec);
+            freez(ae->exec);
             ae->exec = strdupz(pointers[16]);
             if(!*ae->exec) { freez(ae->exec); ae->exec = NULL; }
 
-            if(unlikely(ae->recipient)) freez(ae->recipient);
+            freez(ae->recipient);
             ae->recipient = strdupz(pointers[17]);
             if(!*ae->recipient) { freez(ae->recipient); ae->recipient = NULL; }
 
-            if(unlikely(ae->source)) freez(ae->source);
+            freez(ae->source);
             ae->source = strdupz(pointers[18]);
             if(!*ae->source) { freez(ae->source); ae->source = NULL; }
 
-            if(unlikely(ae->units)) freez(ae->units);
+            freez(ae->units);
             ae->units = strdupz(pointers[19]);
             if(!*ae->units) { freez(ae->units); ae->units = NULL; }
 
-            if(unlikely(ae->info)) freez(ae->info);
+            freez(ae->info);
             ae->info = strdupz(pointers[20]);
             if(!*ae->info) { freez(ae->info); ae->info = NULL; }
 
-            ae->exec_code   = atoi(pointers[21]);
-            ae->new_status  = atoi(pointers[22]);
-            ae->old_status  = atoi(pointers[23]);
-            ae->delay       = atoi(pointers[24]);
+            ae->exec_code   = str2i(pointers[21]);
+            ae->new_status  = str2i(pointers[22]);
+            ae->old_status  = str2i(pointers[23]);
+            ae->delay       = str2i(pointers[24]);
 
-            ae->new_value   = strtold(pointers[25], NULL);
-            ae->old_value   = strtold(pointers[26], NULL);
+            ae->new_value   = str2l(pointers[25]);
+            ae->old_value   = str2l(pointers[26]);
+
+            static char value_string[100 + 1];
+            freez(ae->old_value_string);
+            freez(ae->new_value_string);
+            ae->old_value_string = strdupz(format_value_and_unit(value_string, 100, ae->old_value, ae->units, -1));
+            ae->new_value_string = strdupz(format_value_and_unit(value_string, 100, ae->new_value, ae->units, -1));
 
             // add it to host if not already there
             if(unlikely(*pointers[0] == 'A')) {
@@ -353,17 +359,26 @@ static inline void health_alarm_log_load(RRDHOST *host) {
 // ----------------------------------------------------------------------------
 // health alarm log management
 
-static inline void health_alarm_log(RRDHOST *host,
-                uint32_t alarm_id, uint32_t alarm_event_id,
-                time_t when,
-                const char *name, const char *chart, const char *family,
-                const char *exec, const char *recipient, time_t duration,
-                calculated_number old_value, calculated_number new_value,
-                int old_status, int new_status,
-                const char *source,
-                const char *units,
-                const char *info,
-                int delay
+static inline void health_alarm_log(
+        RRDHOST *host,
+        uint32_t alarm_id,
+        uint32_t alarm_event_id,
+        time_t when,
+        const char *name,
+        const char *chart,
+        const char *family,
+        const char *exec,
+        const char *recipient,
+        time_t duration,
+        calculated_number old_value,
+        calculated_number new_value,
+        int old_status,
+        int new_status,
+        const char *source,
+        const char *units,
+        const char *info,
+        int delay,
+        uint32_t flags
 ) {
     debug(D_HEALTH, "Health adding alarm log entry with id: %u", host->health_log.next_log_id);
 
@@ -391,11 +406,18 @@ static inline void health_alarm_log(RRDHOST *host,
     ae->when = when;
     ae->old_value = old_value;
     ae->new_value = new_value;
+
+    static char value_string[100 + 1];
+    ae->old_value_string = strdupz(format_value_and_unit(value_string, 100, ae->old_value, ae->units, -1));
+    ae->new_value_string = strdupz(format_value_and_unit(value_string, 100, ae->new_value, ae->units, -1));
+
     ae->old_status = old_status;
     ae->new_status = new_status;
     ae->duration = duration;
     ae->delay = delay;
     ae->delay_up_to_timestamp = when + delay;
+
+    ae->flags |= flags;
 
     if(ae->old_status == RRDCALC_STATUS_WARNING || ae->old_status == RRDCALC_STATUS_CRITICAL)
         ae->non_clear_duration += ae->duration;
@@ -663,7 +685,7 @@ struct variable2json_helper {
     size_t counter;
 };
 
-static void single_variable2json(void *entry, void *data) {
+static int single_variable2json(void *entry, void *data) {
     struct variable2json_helper *helper = (struct variable2json_helper *)data;
     RRDVAR *rv = (RRDVAR *)entry;
     calculated_number value = rrdvar2number(rv);
@@ -674,6 +696,8 @@ static void single_variable2json(void *entry, void *data) {
         buffer_sprintf(helper->buf, "%s\n\t\t\"%s\": %0.5Lf", helper->counter?",":"", rv->name, (long double)value);
 
     helper->counter++;
+
+    return 0;
 }
 
 void health_api_v1_chart_variables2json(RRDSET *st, BUFFER *buf) {
@@ -1021,7 +1045,7 @@ void rrdsetvar_free(RRDSETVAR *rs) {
 // ----------------------------------------------------------------------------
 // RRDCALC management
 
-static inline const char *rrdcalc_status2string(int status) {
+inline const char *rrdcalc_status2string(int status) {
     switch(status) {
         case RRDCALC_STATUS_REMOVED:
             return "REMOVED";
@@ -1093,7 +1117,27 @@ static void rrdsetcalc_link(RRDSET *st, RRDCALC *rc) {
 
     {
         time_t now = now_realtime_sec();
-        health_alarm_log(st->rrdhost, rc->id, rc->next_event_id++, now, rc->name, rc->rrdset->id, rc->rrdset->family, rc->exec, rc->recipient, now - rc->last_status_change, rc->old_value, rc->value, rc->status, RRDCALC_STATUS_UNINITIALIZED, rc->source, rc->units, rc->info, 0);
+        health_alarm_log(
+                st->rrdhost,
+                rc->id,
+                rc->next_event_id++,
+                now,
+                rc->name,
+                rc->rrdset->id,
+                rc->rrdset->family,
+                rc->exec,
+                rc->recipient,
+                now - rc->last_status_change,
+                rc->old_value,
+                rc->value,
+                rc->status,
+                RRDCALC_STATUS_UNINITIALIZED,
+                rc->source,
+                rc->units,
+                rc->info,
+                0,
+                0
+        );
     }
 }
 
@@ -1131,7 +1175,27 @@ inline void rrdsetcalc_unlink(RRDCALC *rc) {
 
     {
         time_t now = now_realtime_sec();
-        health_alarm_log(st->rrdhost, rc->id, rc->next_event_id++, now, rc->name, rc->rrdset->id, rc->rrdset->family, rc->exec, rc->recipient, now - rc->last_status_change, rc->old_value, rc->value, rc->status, RRDCALC_STATUS_REMOVED, rc->source, rc->units, rc->info, 0);
+        health_alarm_log(
+                st->rrdhost,
+                rc->id,
+                rc->next_event_id++,
+                now,
+                rc->name,
+                rc->rrdset->id,
+                rc->rrdset->family,
+                rc->exec,
+                rc->recipient,
+                now - rc->last_status_change,
+                rc->old_value,
+                rc->value,
+                rc->status,
+                RRDCALC_STATUS_REMOVED,
+                rc->source,
+                rc->units,
+                rc->info,
+                0,
+                0
+        );
     }
 
     RRDHOST *host = st->rrdhost;
@@ -1398,7 +1462,8 @@ void rrdcalctemplate_link_matching(RRDSET *st) {
     RRDCALCTEMPLATE *rt;
 
     for(rt = st->rrdhost->templates; rt ; rt = rt->next) {
-        if(rt->hash_context == st->hash_context && !strcmp(rt->context, st->context)) {
+        if(rt->hash_context == st->hash_context && !strcmp(rt->context, st->context)
+                && (!rt->family_pattern || simple_pattern_matches(rt->family_pattern, st->family))) {
             RRDCALC *rc = rrdcalc_create(st->rrdhost, rt, st->id);
             if(unlikely(!rc))
                 error("Health tried to create alarm from template '%s', but it failed", rt->name);
@@ -1434,6 +1499,9 @@ static inline void rrdcalctemplate_free(RRDHOST *host, RRDCALCTEMPLATE *rt) {
     expression_free(rt->warning);
     expression_free(rt->critical);
 
+    freez(rt->family_match);
+    simple_pattern_free(rt->family_pattern);
+
     freez(rt->name);
     freez(rt->exec);
     freez(rt->recipient);
@@ -1453,6 +1521,7 @@ static inline void rrdcalctemplate_free(RRDHOST *host, RRDCALCTEMPLATE *rt) {
 #define HEALTH_ALARM_KEY "alarm"
 #define HEALTH_TEMPLATE_KEY "template"
 #define HEALTH_ON_KEY "on"
+#define HEALTH_FAMILIES_KEY "families"
 #define HEALTH_LOOKUP_KEY "lookup"
 #define HEALTH_CALC_KEY "calc"
 #define HEALTH_EVERY_KEY "every"
@@ -1465,6 +1534,7 @@ static inline void rrdcalctemplate_free(RRDHOST *host, RRDCALCTEMPLATE *rt) {
 #define HEALTH_UNITS_KEY "units"
 #define HEALTH_INFO_KEY "info"
 #define HEALTH_DELAY_KEY "delay"
+#define HEALTH_OPTIONS_KEY "options"
 
 static inline int rrdcalc_add_alarm_from_config(RRDHOST *host, RRDCALC *rc) {
     if(!rc->chart) {
@@ -1695,6 +1765,35 @@ static inline int health_parse_delay(
     return 1;
 }
 
+static inline uint32_t health_parse_options(const char *s) {
+    uint32_t options = 0;
+    char buf[100+1] = "";
+
+    while(*s) {
+        buf[0] = '\0';
+
+        // skip spaces
+        while(*s && isspace(*s))
+            s++;
+
+        // find the next space
+        size_t count = 0;
+        while(*s && count < 100 && !isspace(*s))
+            buf[count++] = *s++;
+
+        if(buf[0]) {
+            buf[count] = '\0';
+
+            if(!strcasecmp(buf, "no-clear-notification") || !strcasecmp(buf, "no-clear"))
+                options |= RRDCALC_FLAG_NO_CLEAR_NOTIFICATION;
+            else
+                error("Ignoring unknown alarm option '%s'", buf);
+        }
+    }
+
+    return options;
+}
+
 static inline int health_parse_db_lookup(
         size_t line, const char *path, const char *file, char *string,
         int *group_method, int *after, int *before, int *every,
@@ -1797,14 +1896,35 @@ static inline int health_parse_db_lookup(
     return 1;
 }
 
-static inline char *tabs2spaces(char *s) {
-    char *t = s;
-    while(*t) {
-        if(unlikely(*t == '\t')) *t = ' ';
-        t++;
+static inline char *trim_all_spaces(char *buffer) {
+    char *d = buffer, *s = buffer;
+
+    // skip spaces
+    while(isspace(*s)) s++;
+
+    while(*s) {
+        // copy the non-space part
+        while(*s && !isspace(*s)) *d++ = *s++;
+
+        // add a space if we have to
+        if(*s && isspace(*s)) {
+            *d++ = ' ';
+            s++;
+        }
+
+        // skip spaces
+        while(isspace(*s)) s++;
     }
 
-    return s;
+    *d = '\0';
+
+    if(d > buffer) {
+        d--;
+        if(isspace(*d)) *d = '\0';
+    }
+
+    if(!buffer[0]) return NULL;
+    return buffer;
 }
 
 static inline char *health_source_file(size_t line, const char *path, const char *filename) {
@@ -1823,13 +1943,32 @@ static inline void strip_quotes(char *s) {
 int health_readfile(const char *path, const char *filename) {
     debug(D_HEALTH, "Health configuration reading file '%s/%s'", path, filename);
 
-    static uint32_t hash_alarm = 0, hash_template = 0, hash_on = 0, hash_calc = 0, hash_green = 0, hash_red = 0, hash_warn = 0, hash_crit = 0, hash_exec = 0, hash_every = 0, hash_lookup = 0, hash_units = 0, hash_info = 0, hash_recipient = 0, hash_delay = 0;
+    static uint32_t
+            hash_alarm = 0,
+            hash_template = 0,
+            hash_on = 0,
+            hash_families = 0,
+            hash_calc = 0,
+            hash_green = 0,
+            hash_red = 0,
+            hash_warn = 0,
+            hash_crit = 0,
+            hash_exec = 0,
+            hash_every = 0,
+            hash_lookup = 0,
+            hash_units = 0,
+            hash_info = 0,
+            hash_recipient = 0,
+            hash_delay = 0,
+            hash_options = 0;
+
     char buffer[HEALTH_CONF_MAX_LINE + 1];
 
     if(unlikely(!hash_alarm)) {
         hash_alarm = simple_uhash(HEALTH_ALARM_KEY);
         hash_template = simple_uhash(HEALTH_TEMPLATE_KEY);
         hash_on = simple_uhash(HEALTH_ON_KEY);
+        hash_families = simple_uhash(HEALTH_FAMILIES_KEY);
         hash_calc = simple_uhash(HEALTH_CALC_KEY);
         hash_lookup = simple_uhash(HEALTH_LOOKUP_KEY);
         hash_green = simple_uhash(HEALTH_GREEN_KEY);
@@ -1842,6 +1981,7 @@ int health_readfile(const char *path, const char *filename) {
         hash_info = simple_hash(HEALTH_INFO_KEY);
         hash_recipient = simple_hash(HEALTH_RECIPIENT_KEY);
         hash_delay = simple_uhash(HEALTH_DELAY_KEY);
+        hash_options = simple_uhash(HEALTH_OPTIONS_KEY);
     }
 
     snprintfz(buffer, HEALTH_CONF_MAX_LINE, "%s/%s", path, filename);
@@ -1884,8 +2024,8 @@ int health_readfile(const char *path, const char *filename) {
         s++;
 
         char *value = s;
-        key = trim(key);
-        value = trim(value);
+        key = trim_all_spaces(key);
+        value = trim_all_spaces(value);
 
         if(!key) {
             error("Health configuration has invalid line %zu of file '%s/%s'. Keyword is empty. Ignoring it.", line, path, filename);
@@ -1911,7 +2051,7 @@ int health_readfile(const char *path, const char *filename) {
 
             rc = callocz(1, sizeof(RRDCALC));
             rc->next_event_id = 1;
-            rc->name = tabs2spaces(strdupz(value));
+            rc->name = strdupz(value);
             rc->hash = simple_hash(rc->name);
             rc->source = health_source_file(line, path, filename);
             rc->green = NAN;
@@ -1934,7 +2074,7 @@ int health_readfile(const char *path, const char *filename) {
                 rrdcalctemplate_free(&localhost, rt);
 
             rt = callocz(1, sizeof(RRDCALCTEMPLATE));
-            rt->name = tabs2spaces(strdupz(value));
+            rt->name = strdupz(value);
             rt->hash_name = simple_hash(rt->name);
             rt->source = health_source_file(line, path, filename);
             rt->green = NAN;
@@ -1949,11 +2089,11 @@ int health_readfile(const char *path, const char *filename) {
                 if(rc->chart) {
                     if(strcmp(rc->chart, value))
                         error("Health configuration at line %zu of file '%s/%s' for alarm '%s' has key '%s' twice, once with value '%s' and later with value '%s'. Using ('%s').",
-                             line, path, filename, rc->name, key, rc->chart, value, value);
+                                line, path, filename, rc->name, key, rc->chart, value, value);
 
                     freez(rc->chart);
                 }
-                rc->chart = tabs2spaces(strdupz(value));
+                rc->chart = strdupz(value);
                 rc->hash_chart = simple_hash(rc->chart);
             }
             else if(hash == hash_lookup && !strcasecmp(key, HEALTH_LOOKUP_KEY)) {
@@ -2017,7 +2157,7 @@ int health_readfile(const char *path, const char *filename) {
 
                     freez(rc->exec);
                 }
-                rc->exec = tabs2spaces(strdupz(value));
+                rc->exec = strdupz(value);
             }
             else if(hash == hash_recipient && !strcasecmp(key, HEALTH_RECIPIENT_KEY)) {
                 if(rc->recipient) {
@@ -2027,7 +2167,7 @@ int health_readfile(const char *path, const char *filename) {
 
                     freez(rc->recipient);
                 }
-                rc->recipient = tabs2spaces(strdupz(value));
+                rc->recipient = strdupz(value);
             }
             else if(hash == hash_units && !strcasecmp(key, HEALTH_UNITS_KEY)) {
                 if(rc->units) {
@@ -2037,7 +2177,7 @@ int health_readfile(const char *path, const char *filename) {
 
                     freez(rc->units);
                 }
-                rc->units = tabs2spaces(strdupz(value));
+                rc->units = strdupz(value);
                 strip_quotes(rc->units);
             }
             else if(hash == hash_info && !strcasecmp(key, HEALTH_INFO_KEY)) {
@@ -2048,11 +2188,14 @@ int health_readfile(const char *path, const char *filename) {
 
                     freez(rc->info);
                 }
-                rc->info = tabs2spaces(strdupz(value));
+                rc->info = strdupz(value);
                 strip_quotes(rc->info);
             }
             else if(hash == hash_delay && !strcasecmp(key, HEALTH_DELAY_KEY)) {
                 health_parse_delay(line, path, filename, value, &rc->delay_up_duration, &rc->delay_down_duration, &rc->delay_max_duration, &rc->delay_multiplier);
+            }
+            else if(hash == hash_options && !strcasecmp(key, HEALTH_OPTIONS_KEY)) {
+                rc->options |= health_parse_options(value);
             }
             else {
                 error("Health configuration at line %zu of file '%s/%s' for alarm '%s' has unknown key '%s'.",
@@ -2064,17 +2207,23 @@ int health_readfile(const char *path, const char *filename) {
                 if(rt->context) {
                     if(strcmp(rt->context, value))
                         error("Health configuration at line %zu of file '%s/%s' for template '%s' has key '%s' twice, once with value '%s' and later with value '%s'. Using ('%s').",
-                             line, path, filename, rt->name, key, rt->context, value, value);
+                                line, path, filename, rt->name, key, rt->context, value, value);
 
                     freez(rt->context);
                 }
-                rt->context = tabs2spaces(strdupz(value));
+                rt->context = strdupz(value);
                 rt->hash_context = simple_hash(rt->context);
+            }
+            else if(hash == hash_families && !strcasecmp(key, HEALTH_FAMILIES_KEY)) {
+                freez(rt->family_match);
+                simple_pattern_free(rt->family_pattern);
+
+                rt->family_match = strdupz(value);
+                rt->family_pattern = simple_pattern_create(rt->family_match, SIMPLE_PATTERN_EXACT);
             }
             else if(hash == hash_lookup && !strcasecmp(key, HEALTH_LOOKUP_KEY)) {
                 health_parse_db_lookup(line, path, filename, value, &rt->group, &rt->after, &rt->before,
-                                       &rt->update_every,
-                                       &rt->options, &rt->dimensions);
+                                       &rt->update_every, &rt->options, &rt->dimensions);
             }
             else if(hash == hash_every && !strcasecmp(key, HEALTH_EVERY_KEY)) {
                 if(!health_parse_duration(value, &rt->update_every))
@@ -2132,7 +2281,7 @@ int health_readfile(const char *path, const char *filename) {
 
                     freez(rt->exec);
                 }
-                rt->exec = tabs2spaces(strdupz(value));
+                rt->exec = strdupz(value);
             }
             else if(hash == hash_recipient && !strcasecmp(key, HEALTH_RECIPIENT_KEY)) {
                 if(rt->recipient) {
@@ -2142,7 +2291,7 @@ int health_readfile(const char *path, const char *filename) {
 
                     freez(rt->recipient);
                 }
-                rt->recipient = tabs2spaces(strdupz(value));
+                rt->recipient = strdupz(value);
             }
             else if(hash == hash_units && !strcasecmp(key, HEALTH_UNITS_KEY)) {
                 if(rt->units) {
@@ -2152,7 +2301,7 @@ int health_readfile(const char *path, const char *filename) {
 
                     freez(rt->units);
                 }
-                rt->units = tabs2spaces(strdupz(value));
+                rt->units = strdupz(value);
                 strip_quotes(rt->units);
             }
             else if(hash == hash_info && !strcasecmp(key, HEALTH_INFO_KEY)) {
@@ -2163,11 +2312,14 @@ int health_readfile(const char *path, const char *filename) {
 
                     freez(rt->info);
                 }
-                rt->info = tabs2spaces(strdupz(value));
+                rt->info = strdupz(value);
                 strip_quotes(rt->info);
             }
             else if(hash == hash_delay && !strcasecmp(key, HEALTH_DELAY_KEY)) {
                 health_parse_delay(line, path, filename, value, &rt->delay_up_duration, &rt->delay_down_duration, &rt->delay_max_duration, &rt->delay_multiplier);
+            }
+            else if(hash == hash_options && !strcasecmp(key, HEALTH_OPTIONS_KEY)) {
+                rt->options |= health_parse_options(value);
             }
             else {
                 error("Health configuration at line %zu of file '%s/%s' for template '%s' has unknown key '%s'.",
@@ -2291,60 +2443,69 @@ static inline void health_string2json(BUFFER *wb, const char *prefix, const char
 }
 
 static inline void health_alarm_entry2json_nolock(BUFFER *wb, ALARM_ENTRY *ae, RRDHOST *host) {
-    buffer_sprintf(wb, "\n\t{\n"
-                           "\t\t\"hostname\": \"%s\",\n"
-                           "\t\t\"unique_id\": %u,\n"
-                           "\t\t\"alarm_id\": %u,\n"
-                           "\t\t\"alarm_event_id\": %u,\n"
-                           "\t\t\"name\": \"%s\",\n"
-                           "\t\t\"chart\": \"%s\",\n"
-                           "\t\t\"family\": \"%s\",\n"
-                           "\t\t\"processed\": %s,\n"
-                           "\t\t\"updated\": %s,\n"
-                           "\t\t\"exec_run\": %lu,\n"
-                           "\t\t\"exec_failed\": %s,\n"
-                           "\t\t\"exec\": \"%s\",\n"
-                           "\t\t\"recipient\": \"%s\",\n"
-                           "\t\t\"exec_code\": %d,\n"
-                           "\t\t\"source\": \"%s\",\n"
-                           "\t\t\"units\": \"%s\",\n"
-                           "\t\t\"info\": \"%s\",\n"
-                           "\t\t\"when\": %lu,\n"
-                           "\t\t\"duration\": %lu,\n"
-                           "\t\t\"non_clear_duration\": %lu,\n"
-                           "\t\t\"status\": \"%s\",\n"
-                           "\t\t\"old_status\": \"%s\",\n"
-                           "\t\t\"delay\": %d,\n"
-                           "\t\t\"delay_up_to_timestamp\": %lu,\n"
-                           "\t\t\"updated_by_id\": %u,\n"
-                           "\t\t\"updates_id\": %u,\n",
-                   host->hostname,
-                   ae->unique_id,
-                   ae->alarm_id,
-                   ae->alarm_event_id,
-                   ae->name,
-                   ae->chart,
-                   ae->family,
-                   (ae->flags & HEALTH_ENTRY_FLAG_PROCESSED)?"true":"false",
-                   (ae->flags & HEALTH_ENTRY_FLAG_UPDATED)?"true":"false",
-                   (unsigned long)ae->exec_run_timestamp,
-                   (ae->flags & HEALTH_ENTRY_FLAG_EXEC_FAILED)?"true":"false",
-                   ae->exec?ae->exec:health.health_default_exec,
-                   ae->recipient?ae->recipient:health.health_default_recipient,
-                   ae->exec_code,
-                   ae->source,
-                   ae->units?ae->units:"",
-                   ae->info?ae->info:"",
-                   (unsigned long)ae->when,
-                   (unsigned long)ae->duration,
-                   (unsigned long)ae->non_clear_duration,
-                   rrdcalc_status2string(ae->new_status),
-                   rrdcalc_status2string(ae->old_status),
-                   ae->delay,
-                   (unsigned long)ae->delay_up_to_timestamp,
-                   ae->updated_by_id,
-                   ae->updates_id
+    buffer_sprintf(wb,
+            "\n\t{\n"
+                    "\t\t\"hostname\": \"%s\",\n"
+                    "\t\t\"unique_id\": %u,\n"
+                    "\t\t\"alarm_id\": %u,\n"
+                    "\t\t\"alarm_event_id\": %u,\n"
+                    "\t\t\"name\": \"%s\",\n"
+                    "\t\t\"chart\": \"%s\",\n"
+                    "\t\t\"family\": \"%s\",\n"
+                    "\t\t\"processed\": %s,\n"
+                    "\t\t\"updated\": %s,\n"
+                    "\t\t\"exec_run\": %lu,\n"
+                    "\t\t\"exec_failed\": %s,\n"
+                    "\t\t\"exec\": \"%s\",\n"
+                    "\t\t\"recipient\": \"%s\",\n"
+                    "\t\t\"exec_code\": %d,\n"
+                    "\t\t\"source\": \"%s\",\n"
+                    "\t\t\"units\": \"%s\",\n"
+                    "\t\t\"info\": \"%s\",\n"
+                    "\t\t\"when\": %lu,\n"
+                    "\t\t\"duration\": %lu,\n"
+                    "\t\t\"non_clear_duration\": %lu,\n"
+                    "\t\t\"status\": \"%s\",\n"
+                    "\t\t\"old_status\": \"%s\",\n"
+                    "\t\t\"delay\": %d,\n"
+                    "\t\t\"delay_up_to_timestamp\": %lu,\n"
+                    "\t\t\"updated_by_id\": %u,\n"
+                    "\t\t\"updates_id\": %u,\n"
+                    "\t\t\"value_string\": \"%s\",\n"
+                    "\t\t\"old_value_string\": \"%s\",\n"
+            , host->hostname
+            , ae->unique_id
+            , ae->alarm_id
+            , ae->alarm_event_id
+            , ae->name
+            , ae->chart
+            , ae->family
+            , (ae->flags & HEALTH_ENTRY_FLAG_PROCESSED)?"true":"false"
+            , (ae->flags & HEALTH_ENTRY_FLAG_UPDATED)?"true":"false"
+            , (unsigned long)ae->exec_run_timestamp
+            , (ae->flags & HEALTH_ENTRY_FLAG_EXEC_FAILED)?"true":"false"
+            , ae->exec?ae->exec:health.health_default_exec
+            , ae->recipient?ae->recipient:health.health_default_recipient
+            , ae->exec_code
+            , ae->source
+            , ae->units?ae->units:""
+            , ae->info?ae->info:""
+            , (unsigned long)ae->when
+            , (unsigned long)ae->duration
+            , (unsigned long)ae->non_clear_duration
+            , rrdcalc_status2string(ae->new_status)
+            , rrdcalc_status2string(ae->old_status)
+            , ae->delay
+            , (unsigned long)ae->delay_up_to_timestamp
+            , ae->updated_by_id
+            , ae->updates_id
+            , ae->new_value_string
+            , ae->old_value_string
     );
+
+    if(unlikely(ae->flags & HEALTH_ENTRY_FLAG_NO_CLEAR_NOTIFICATION)) {
+        buffer_strcat(wb, "\t\t\"no_clear_notification\": true,\n");
+    }
 
     buffer_strcat(wb, "\t\t\"value\":");
     buffer_rrd_value(wb, ae->new_value);
@@ -2378,6 +2539,9 @@ void health_alarm_log2json(RRDHOST *host, BUFFER *wb, uint32_t after) {
 }
 
 static inline void health_rrdcalc2json_nolock(BUFFER *wb, RRDCALC *rc) {
+    char value_string[100 + 1];
+    format_value_and_unit(value_string, 100, rc->value, rc->units, -1);
+
     buffer_sprintf(wb,
            "\t\t\"%s.%s\": {\n"
                    "\t\t\t\"id\": %lu,\n"
@@ -2401,29 +2565,35 @@ static inline void health_rrdcalc2json_nolock(BUFFER *wb, RRDCALC *rc) {
                    "\t\t\t\"delay_multiplier\": %f,\n"
                    "\t\t\t\"delay\": %d,\n"
                    "\t\t\t\"delay_up_to_timestamp\": %lu,\n"
-            , rc->chart, rc->name
-            , (unsigned long)rc->id
-            , rc->name
-            , rc->chart
-            , (rc->rrdset && rc->rrdset->family)?rc->rrdset->family:""
-            , (rc->rrdset)?"true":"false"
-            , rc->exec?rc->exec:health.health_default_exec
-            , rc->recipient?rc->recipient:health.health_default_recipient
-            , rc->source
-            , rc->units?rc->units:""
-            , rc->info?rc->info:""
-            , rrdcalc_status2string(rc->status)
-            , (unsigned long)rc->last_status_change
-            , (unsigned long)rc->last_updated
-            , (unsigned long)rc->next_update
-            , rc->update_every
-            , rc->delay_up_duration
-            , rc->delay_down_duration
-            , rc->delay_max_duration
-            , rc->delay_multiplier
-            , rc->delay_last
-            , (unsigned long)rc->delay_up_to_timestamp
+                   "\t\t\t\"value_string\": \"%s\",\n"
+           , rc->chart, rc->name
+           , (unsigned long)rc->id
+           , rc->name
+           , rc->chart
+           , (rc->rrdset && rc->rrdset->family)?rc->rrdset->family:""
+           , (rc->rrdset)?"true":"false"
+           , rc->exec?rc->exec:health.health_default_exec
+           , rc->recipient?rc->recipient:health.health_default_recipient
+           , rc->source
+           , rc->units?rc->units:""
+           , rc->info?rc->info:""
+           , rrdcalc_status2string(rc->status)
+           , (unsigned long)rc->last_status_change
+           , (unsigned long)rc->last_updated
+           , (unsigned long)rc->next_update
+           , rc->update_every
+           , rc->delay_up_duration
+           , rc->delay_down_duration
+           , rc->delay_max_duration
+           , rc->delay_multiplier
+           , rc->delay_last
+           , (unsigned long)rc->delay_up_to_timestamp
+           , value_string
     );
+
+    if(unlikely(rc->options & RRDCALC_FLAG_NO_CLEAR_NOTIFICATION)) {
+        buffer_strcat(wb, "\t\t\t\"no_clear_notification\": true,\n");
+    }
 
     if(RRDCALC_HAS_DB_LOOKUP(rc)) {
         if(rc->dimensions && *rc->dimensions)
@@ -2587,12 +2757,21 @@ static inline void health_alarm_execute(RRDHOST *host, ALARM_ENTRY *ae) {
 
     if(unlikely(ae->new_status < RRDCALC_STATUS_CLEAR)) {
         // do not send notifications for internal statuses
+        debug(D_HEALTH, "Health not sending notification for alarm '%s.%s' status %s (internal statuses)", ae->chart, ae->name, rrdcalc_status2string(ae->new_status));
+        goto done;
+    }
+
+    if(unlikely(ae->new_status <= RRDCALC_STATUS_CLEAR && (ae->flags & HEALTH_ENTRY_FLAG_NO_CLEAR_NOTIFICATION))) {
+        // do not send notifications for disabled statuses
+        debug(D_HEALTH, "Health not sending notification for alarm '%s.%s' status %s (it has no-clear-notification enabled)", ae->chart, ae->name, rrdcalc_status2string(ae->new_status));
+        // mark it as run, so that we will send the same alarm if it happens again
         goto done;
     }
 
     // find the previous notification for the same alarm
     // which we have run the exec script
-    {
+    // exception: alarms with HEALTH_ENTRY_FLAG_NO_CLEAR_NOTIFICATION set
+    if(likely(!(ae->flags & HEALTH_ENTRY_FLAG_NO_CLEAR_NOTIFICATION))) {
         uint32_t id = ae->alarm_id;
         ALARM_ENTRY *t;
         for(t = ae->next; t ; t = t->next) {
@@ -2629,7 +2808,7 @@ static inline void health_alarm_execute(RRDHOST *host, ALARM_ENTRY *ae) {
     const char *recipient = ae->recipient;
     if(!recipient) recipient = health.health_default_recipient;
 
-    snprintfz(command_to_run, ALARM_EXEC_COMMAND_LENGTH, "exec %s '%s' '%s' '%u' '%u' '%u' '%lu' '%s' '%s' '%s' '%s' '%s' '%0.0Lf' '%0.0Lf' '%s' '%u' '%u' '%s' '%s'",
+    snprintfz(command_to_run, ALARM_EXEC_COMMAND_LENGTH, "exec %s '%s' '%s' '%u' '%u' '%u' '%lu' '%s' '%s' '%s' '%s' '%s' '%0.0Lf' '%0.0Lf' '%s' '%u' '%u' '%s' '%s' '%s' '%s'",
               exec,
               recipient,
               host->hostname,
@@ -2648,7 +2827,9 @@ static inline void health_alarm_execute(RRDHOST *host, ALARM_ENTRY *ae) {
               (uint32_t)ae->duration,
               (uint32_t)ae->non_clear_duration,
               ae->units?ae->units:"",
-              ae->info?ae->info:""
+              ae->info?ae->info:"",
+              ae->new_value_string,
+              ae->old_value_string
     );
 
     ae->flags |= HEALTH_ENTRY_FLAG_EXEC_RUN;
@@ -2740,6 +2921,8 @@ static inline void health_alarm_log_process(RRDHOST *host) {
         freez(ae->source);
         freez(ae->units);
         freez(ae->info);
+        freez(ae->old_value_string);
+        freez(ae->new_value_string);
         freez(ae);
 
         ae = t;
@@ -2804,7 +2987,7 @@ static inline int rrdcalc_isrunnable(RRDCALC *rc, time_t now, time_t *next_run) 
 }
 
 void *health_main(void *ptr) {
-    (void)ptr;
+    struct netdata_static_thread *static_thread = (struct netdata_static_thread *)ptr;
 
     info("HEALTH thread created with task id %d", gettid());
 
@@ -3069,7 +3252,27 @@ void *health_main(void *ptr) {
 
                     rc->delay_last = delay;
                     rc->delay_up_to_timestamp = now + delay;
-                    health_alarm_log(&localhost, rc->id, rc->next_event_id++, now, rc->name, rc->rrdset->id, rc->rrdset->family, rc->exec, rc->recipient, now - rc->last_status_change, rc->old_value, rc->value, rc->status, status, rc->source, rc->units, rc->info, rc->delay_last);
+                    health_alarm_log(
+                            &localhost,
+                            rc->id,
+                            rc->next_event_id++,
+                            now,
+                            rc->name,
+                            rc->rrdset->id,
+                            rc->rrdset->family,
+                            rc->exec,
+                            rc->recipient,
+                            now - rc->last_status_change,
+                            rc->old_value,
+                            rc->value,
+                            rc->status,
+                            status,
+                            rc->source,
+                            rc->units,
+                            rc->info,
+                            rc->delay_last,
+                            (rc->options & RRDCALC_FLAG_NO_CLEAR_NOTIFICATION)?HEALTH_ENTRY_FLAG_NO_CLEAR_NOTIFICATION:0
+                    );
                     rc->last_status_change = now;
                     rc->status = status;
                 }
@@ -3111,6 +3314,8 @@ void *health_main(void *ptr) {
     buffer_free(wb);
 
     info("HEALTH thread exiting");
+
+    static_thread->enabled = 0;
     pthread_exit(NULL);
     return NULL;
 }

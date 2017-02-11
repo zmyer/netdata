@@ -22,19 +22,38 @@ if [ "${1}" = "install" ]
         "${@}" || exit 1
     }
 
+    download() {
+        local curl="$(which curl 2>/dev/null || command -v curl 2>/dev/null)"
+        [ ! -z "${curl}" ] && run curl -s -L "${1}" && return 0
+
+        local wget="$(which wget 2>/dev/null || command -v wget 2>/dev/null)"
+        [ ! -z "${wget}" ] && run wget -q -O - "${1}" && return 0
+
+        echo >&2 "Cannot find 'curl' or 'wget' in this system." && exit 1
+    }
+
     [ ! -d /usr/src ] && run mkdir -p /usr/src
     [ ! -d /usr/local/bin ] && run mkdir -p /usr/local/bin
 
     run cd /usr/src
 
-    if [ -d fping-ktsaou.git ]
+    if [ -d fping-3.15 ]
         then
-        run cd fping-ktsaou.git
-        run git pull
-    else
-        run git clone https://github.com/ktsaou/fping.git fping-ktsaou.git
-        run cd fping-ktsaou.git
+        run rm -rf fping-3.15 || exit 1
     fi
+
+    download 'https://github.com/schweikert/fping/archive/3.15.tar.gz' | run tar -zxvpf -
+    [ $? -ne 0 ] && exit 1
+    run cd fping-3.15 || exit 1
+
+    #if [ -d fping-ktsaou.git ]
+    #    then
+    #    run cd fping-ktsaou.git
+    #    run git pull
+    #else
+    #    run git clone https://github.com/ktsaou/fping.git fping-ktsaou.git
+    #    run cd fping-ktsaou.git
+    #fi
 
     run ./autogen.sh
     run ./configure --prefix=/usr/local
@@ -106,6 +125,14 @@ debug() {
 
 # -----------------------------------------------------------------------------
 
+# store in ${plugin} the name we run under
+# this allows us to copy/link fping.plugin under a different name
+# to have multiple fping plugins running with different settings
+plugin="${PROGRAM_NAME/.plugin/}"
+
+
+# -----------------------------------------------------------------------------
+
 # the frequency to send info to netdata
 # passed by netdata as the first parameter
 update_every="${1-1}"
@@ -137,21 +164,21 @@ fping_opts="-R -b 56 -i 1 -r 0 -t 5000"
 # -----------------------------------------------------------------------------
 # load the configuration file
 
-if [ ! -f "${NETDATA_CONFIG_DIR}/fping.conf" ]
+if [ ! -f "${NETDATA_CONFIG_DIR}/${plugin}.conf" ]
 then
-	fatal "configuration file '${NETDATA_CONFIG_DIR}/fping.conf' not found - nothing to do."
+	fatal "configuration file '${NETDATA_CONFIG_DIR}/${plugin}.conf' not found - nothing to do."
 fi
 
-source "${NETDATA_CONFIG_DIR}/fping.conf"
+source "${NETDATA_CONFIG_DIR}/${plugin}.conf"
 
 if [ -z "${hosts}" ]
 then
-	fatal "no hosts configued in '${NETDATA_CONFIG_DIR}/fping.conf' - nothing to do."
+	fatal "no hosts configued in '${NETDATA_CONFIG_DIR}/${plugin}.conf' - nothing to do."
 fi
 
 if [ -z "${fping}" -o ! -x "${fping}" ]
 then
-	fatal "command '${fping}' is not executable - cannot proceed."
+	fatal "command '${fping}' is not found or is not executable - cannot proceed."
 fi
 
 if [ ${ping_every} -lt 20 ]

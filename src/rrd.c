@@ -118,7 +118,7 @@ RRDFAMILY *rrdfamily_create(const char *id) {
 
         RRDFAMILY *ret = rrdfamily_index_add(&localhost, rc);
         if(ret != rc)
-            fatal("INTERNAL ERROR: Expected to INSERT RRDFAMILY '%s' into index, but inserted '%s'.", rc->family, (ret)?ret->family:"NONE");
+            fatal("RRDFAMILY: INTERNAL ERROR: Expected to INSERT RRDFAMILY '%s' into index, but inserted '%s'.", rc->family, (ret)?ret->family:"NONE");
     }
 
     rc->use_count++;
@@ -130,10 +130,10 @@ void rrdfamily_free(RRDFAMILY *rc) {
     if(!rc->use_count) {
         RRDFAMILY *ret = rrdfamily_index_del(&localhost, rc);
         if(ret != rc)
-            fatal("INTERNAL ERROR: Expected to DELETE RRDFAMILY '%s' from index, but deleted '%s'.", rc->family, (ret)?ret->family:"NONE");
+            fatal("RRDFAMILY: INTERNAL ERROR: Expected to DELETE RRDFAMILY '%s' from index, but deleted '%s'.", rc->family, (ret)?ret->family:"NONE");
 
         if(rc->variables_root_index.avl_tree.root != NULL)
-            fatal("INTERNAL ERROR: Variables index of RRDFAMILY '%s' that is freed, is not empty.", rc->family);
+            fatal("RRDFAMILY: INTERNAL ERROR: Variables index of RRDFAMILY '%s' that is freed, is not empty.", rc->family);
 
         freez((void *)rc->family);
         freez(rc);
@@ -222,8 +222,8 @@ static int rrddim_compare(void* a, void* b) {
     else return strcmp(((RRDDIM *)a)->id, ((RRDDIM *)b)->id);
 }
 
-#define rrddim_index_add(st, rd) avl_insert_lock(&((st)->dimensions_index), (avl *)(rd))
-#define rrddim_index_del(st,rd ) avl_remove_lock(&((st)->dimensions_index), (avl *)(rd))
+#define rrddim_index_add(st, rd) (RRDDIM *)avl_insert_lock(&((st)->dimensions_index), (avl *)(rd))
+#define rrddim_index_del(st,rd ) (RRDDIM *)avl_remove_lock(&((st)->dimensions_index), (avl *)(rd))
 
 static RRDDIM *rrddim_index_find(RRDSET *st, const char *id, uint32_t hash) {
     RRDDIM tmp;
@@ -381,7 +381,8 @@ void rrdset_set_name(RRDSET *st, const char *name)
         rrddimvar_rename_all(rd);
     pthread_rwlock_unlock(&st->rwlock);
 
-    rrdset_index_add_name(&localhost, st);
+    if(unlikely(rrdset_index_add_name(&localhost, st) != st))
+        error("RRDSET: INTERNAL ERROR: attempted to index duplicate chart name '%s'", st->name);
 }
 
 // ----------------------------------------------------------------------------
@@ -484,7 +485,7 @@ RRDSET *rrdset_create(const char *type, const char *id, const char *name, const 
 
     RRDSET *st = rrdset_find(fullid);
     if(st) {
-        error("Cannot create rrd stats for '%s', it already exists.", fullid);
+        debug(D_RRD_CALLS, "RRDSET '%s', already exists.", fullid);
         return st;
     }
 
@@ -548,6 +549,11 @@ RRDSET *rrdset_create(const char *type, const char *id, const char *name, const 
         st->mapped = rrd_memory_mode;
         st->variables = NULL;
         st->alarms = NULL;
+        memset(&st->rwlock, 0, sizeof(pthread_rwlock_t));
+        memset(&st->avl, 0, sizeof(avl));
+        memset(&st->avlname, 0, sizeof(avl));
+        memset(&st->variables_root_index, 0, sizeof(avl_tree_lock));
+        memset(&st->dimensions_index, 0, sizeof(avl_tree_lock));
     }
     else {
         st = callocz(1, size);
@@ -629,7 +635,8 @@ RRDSET *rrdset_create(const char *type, const char *id, const char *name, const 
         rrdsetvar_create(st, "update_every", RRDVAR_TYPE_INT, &st->update_every, 0);
     }
 
-    rrdset_index_add(&localhost, st);
+    if(unlikely(rrdset_index_add(&localhost, st) != st))
+        error("RRDSET: INTERNAL ERROR: attempt to index duplicate chart '%s'", st->id);
 
     rrdsetcalc_link_matching(st);
     rrdcalctemplate_link_matching(st);
@@ -641,18 +648,26 @@ RRDSET *rrdset_create(const char *type, const char *id, const char *name, const 
 
 RRDDIM *rrddim_add(RRDSET *st, const char *id, const char *name, long multiplier, long divisor, int algorithm)
 {
+    RRDDIM *rd = rrddim_find(st, id);
+    if(rd) {
+        debug(D_RRD_CALLS, "Cannot create rrd dimension '%s/%s', it already exists.", st->id, name?name:"<NONAME>");
+        return rd;
+    }
+
     char filename[FILENAME_MAX + 1];
     char fullfilename[FILENAME_MAX + 1];
 
     char varname[CONFIG_MAX_NAME + 1];
-    RRDDIM *rd = NULL;
     unsigned long size = sizeof(RRDDIM) + (st->entries * sizeof(storage_number));
 
     debug(D_RRD_CALLS, "Adding dimension '%s/%s'.", st->id, id);
 
     rrdset_strncpyz_name(filename, id, FILENAME_MAX);
     snprintfz(fullfilename, FILENAME_MAX, "%s/%s.db", st->cache_dir, filename);
-    if(rrd_memory_mode != RRD_MEMORY_MODE_RAM) rd = (RRDDIM *)mymmap(fullfilename, size, ((rrd_memory_mode == RRD_MEMORY_MODE_MAP)?MAP_SHARED:MAP_PRIVATE), 1);
+
+    if(rrd_memory_mode != RRD_MEMORY_MODE_RAM)
+        rd = (RRDDIM *)mymmap(fullfilename, size, ((rrd_memory_mode == RRD_MEMORY_MODE_MAP)?MAP_SHARED:MAP_PRIVATE), 1);
+
     if(rd) {
         struct timeval now;
         now_realtime_timeval(&now);
@@ -708,6 +723,7 @@ RRDDIM *rrddim_add(RRDSET *st, const char *id, const char *name, long multiplier
         rd->variables = NULL;
         rd->next = NULL;
         rd->name = NULL;
+        memset(&rd->avl, 0, sizeof(avl));
     }
     else {
         // if we didn't manage to get a mmap'd dimension, just create one
@@ -771,7 +787,8 @@ RRDDIM *rrddim_add(RRDSET *st, const char *id, const char *name, long multiplier
 
     pthread_rwlock_unlock(&st->rwlock);
 
-    rrddim_index_add(st, rd);
+    if(unlikely(rrddim_index_add(st, rd) != rd))
+        error("RRDDIM: INTERNAL ERROR: attempt to index duplicate dimension '%s' on chart '%s'", rd->id, st->id);
 
     return(rd);
 }
@@ -810,7 +827,8 @@ void rrddim_free(RRDSET *st, RRDDIM *rd)
     while(rd->variables)
         rrddimvar_free(rd->variables);
 
-    rrddim_index_del(st, rd);
+    if(unlikely(rrddim_index_del(st, rd) != rd))
+        error("RRDDIM: INTERNAL ERROR: attempt to remove from index dimension '%s' on chart '%s', removed a different dimension.", rd->id, st->id);
 
     // free(rd->annotations);
     if(rd->mapped == RRD_MEMORY_MODE_SAVE) {
@@ -851,7 +869,10 @@ void rrdset_free_all(void)
         while(st->dimensions)
             rrddim_free(st, st->dimensions);
 
-        rrdset_index_del(&localhost, st);
+        if(unlikely(rrdset_index_del(&localhost, st) != st))
+            error("RRDSET: INTERNAL ERROR: attempt to remove from index chart '%s', removed a different chart.", st->id);
+
+        rrdset_index_del_name(&localhost, st);
 
         st->rrdfamily->use_count--;
         if(!st->rrdfamily->use_count)
@@ -859,14 +880,7 @@ void rrdset_free_all(void)
 
         pthread_rwlock_unlock(&st->rwlock);
 
-        if(st->mapped == RRD_MEMORY_MODE_SAVE) {
-            debug(D_RRD_CALLS, "Saving stats '%s' to '%s'.", st->name, st->cache_filename);
-            savememory(st->cache_filename, st, st->memsize);
-
-            debug(D_RRD_CALLS, "Unmapping stats '%s'.", st->name);
-            munmap(st, st->memsize);
-        }
-        else if(st->mapped == RRD_MEMORY_MODE_MAP) {
+        if(st->mapped == RRD_MEMORY_MODE_SAVE || st->mapped == RRD_MEMORY_MODE_MAP) {
             debug(D_RRD_CALLS, "Unmapping stats '%s'.", st->name);
             munmap(st, st->memsize);
         }
@@ -888,9 +902,12 @@ void rrdset_save_all(void) {
     RRDSET *st;
     RRDDIM *rd;
 
+    // we get an write lock
+    // to ensure only one thread is saving the database
     rrdhost_rwlock(&localhost);
+
     for(st = localhost.rrdset_root; st ; st = st->next) {
-        pthread_rwlock_wrlock(&st->rwlock);
+        pthread_rwlock_rdlock(&st->rwlock);
 
         if(st->mapped == RRD_MEMORY_MODE_SAVE) {
             debug(D_RRD_CALLS, "Saving stats '%s' to '%s'.", st->name, st->cache_filename);
@@ -906,6 +923,7 @@ void rrdset_save_all(void) {
 
         pthread_rwlock_unlock(&st->rwlock);
     }
+
     rrdhost_unlock(&localhost);
 }
 
@@ -1024,8 +1042,10 @@ void rrdset_next_usec(RRDSET *st, usec_t microseconds)
     }
     else {
         // microseconds has the time since the last collection
+#ifdef NETDATA_INTERNAL_CHECKS
         usec_t now_usec = timeval_usec(&now);
         usec_t last_usec = timeval_usec(&st->last_collected_time);
+#endif
         usec_t since_last_usec = dt_usec(&now, &st->last_collected_time);
 
         // verify the microseconds given is good

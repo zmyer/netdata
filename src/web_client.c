@@ -414,7 +414,11 @@ int mysendfile(struct web_client *w, char *filename)
     w->wait_send = 0;
     buffer_flush(w->response.data);
     w->response.rlen = stat.st_size;
+#ifdef __APPLE__
+    w->response.data->date = stat.st_mtimespec.tv_sec;
+#else
     w->response.data->date = stat.st_mtim.tv_sec;
+#endif /* __APPLE__ */
     buffer_cacheable(w->response.data);
 
     return 200;
@@ -770,6 +774,49 @@ int web_client_api_request_v1_charts(struct web_client *w, char *url)
     return 200;
 }
 
+int web_client_api_request_v1_allmetrics(struct web_client *w, char *url)
+{
+    int format = ALLMETRICS_SHELL;
+
+    while(url) {
+        char *value = mystrsep(&url, "?&");
+        if (!value || !*value) continue;
+
+        char *name = mystrsep(&value, "=");
+        if(!name || !*name) continue;
+        if(!value || !*value) continue;
+
+        if(!strcmp(name, "format")) {
+            if(!strcmp(value, ALLMETRICS_FORMAT_SHELL))
+                format = ALLMETRICS_SHELL;
+            else if(!strcmp(value, ALLMETRICS_FORMAT_PROMETHEUS))
+                format = ALLMETRICS_PROMETHEUS;
+            else
+                format = 0;
+        }
+    }
+
+    buffer_flush(w->response.data);
+    buffer_no_cacheable(w->response.data);
+
+    switch(format) {
+        case ALLMETRICS_SHELL:
+            w->response.data->contenttype = CT_TEXT_PLAIN;
+            rrd_stats_api_v1_charts_allmetrics_shell(w->response.data);
+            return 200;
+
+        case ALLMETRICS_PROMETHEUS:
+            w->response.data->contenttype = CT_PROMETHEUS;
+            rrd_stats_api_v1_charts_allmetrics_prometheus(w->response.data);
+            return 200;
+
+        default:
+            w->response.data->contenttype = CT_TEXT_PLAIN;
+            buffer_strcat(w->response.data, "Which format? Only '" ALLMETRICS_FORMAT_SHELL "' and '" ALLMETRICS_FORMAT_PROMETHEUS "' is currently supported.");
+            return 400;
+    }
+}
+
 int web_client_api_request_v1_chart(struct web_client *w, char *url)
 {
     return web_client_api_request_single_chart(w, url, rrd_stats_api_v1_chart);
@@ -849,7 +896,7 @@ int web_client_api_request_v1_badge(struct web_client *w, char *url) {
     if(!st) st = rrdset_find_byname(chart);
     if(!st) {
         buffer_no_cacheable(w->response.data);
-        buffer_svg(w->response.data, "chart not found", 0, "", NULL, NULL, 1, -1);
+        buffer_svg(w->response.data, "chart not found", NAN, "", NULL, NULL, -1);
         ret = 200;
         goto cleanup;
     }
@@ -859,18 +906,18 @@ int web_client_api_request_v1_badge(struct web_client *w, char *url) {
         rc = rrdcalc_find(st, alarm);
         if (!rc) {
             buffer_no_cacheable(w->response.data);
-            buffer_svg(w->response.data, "alarm not found", 0, "", NULL, NULL, 1, -1);
+            buffer_svg(w->response.data, "alarm not found", NAN, "", NULL, NULL, -1);
             ret = 200;
             goto cleanup;
         }
     }
 
-    long long multiply  = (multiply_str  && *multiply_str )?atol(multiply_str):1;
-    long long divide    = (divide_str    && *divide_str   )?atol(divide_str):1;
-    long long before    = (before_str    && *before_str   )?atol(before_str):0;
-    long long after     = (after_str     && *after_str    )?atol(after_str):-st->update_every;
-    int       points    = (points_str    && *points_str   )?atoi(points_str):1;
-    int       precision = (precision_str && *precision_str)?atoi(precision_str):-1;
+    long long multiply  = (multiply_str  && *multiply_str )?str2l(multiply_str):1;
+    long long divide    = (divide_str    && *divide_str   )?str2l(divide_str):1;
+    long long before    = (before_str    && *before_str   )?str2l(before_str):0;
+    long long after     = (after_str     && *after_str    )?str2l(after_str):-st->update_every;
+    int       points    = (points_str    && *points_str   )?str2i(points_str):1;
+    int       precision = (precision_str && *precision_str)?str2i(precision_str):-1;
 
     if(!multiply) multiply = 1;
     if(!divide) divide = 1;
@@ -887,7 +934,7 @@ int web_client_api_request_v1_badge(struct web_client *w, char *url) {
             }
         }
         else {
-            refresh = atoi(refresh_str);
+            refresh = str2i(refresh_str);
             if(refresh < 0) refresh = -refresh;
         }
     }
@@ -935,9 +982,6 @@ int web_client_api_request_v1_badge(struct web_client *w, char *url) {
             );
 
     if(rc) {
-        calculated_number n = rc->value;
-        if(isnan(n) || isinf(n)) n = 0;
-
         if (refresh > 0) {
             buffer_sprintf(w->response.header, "Refresh: %d\r\n", refresh);
             w->response.data->expires = now_realtime_sec() + refresh;
@@ -973,19 +1017,18 @@ int web_client_api_request_v1_badge(struct web_client *w, char *url) {
         }
 
         buffer_svg(w->response.data,
-                   label,
-                   rc->value * multiply / divide,
-                   units,
-                   label_color,
-                   value_color,
-                   0,
-                   precision);
+                label,
+                (isnan(rc->value)||isinf(rc->value)) ? rc->value : rc->value * multiply / divide,
+                units,
+                label_color,
+                value_color,
+                precision);
         ret = 200;
     }
     else {
         time_t latest_timestamp = 0;
         int value_is_null = 1;
-        calculated_number n = 0;
+        calculated_number n = NAN;
         ret = 500;
 
         // if the collected value is too old, don't calculate its value
@@ -1018,13 +1061,12 @@ int web_client_api_request_v1_badge(struct web_client *w, char *url) {
 
         // render the badge
         buffer_svg(w->response.data,
-                   label,
-                   n * multiply / divide,
-                   units,
-                   label_color,
-                   value_color,
-                   value_is_null,
-                   precision);
+                label,
+                (value_is_null)?NAN:(n * multiply / divide),
+                units,
+                label_color,
+                value_color,
+                precision);
     }
 
 cleanup:
@@ -1145,9 +1187,9 @@ int web_client_api_request_v1_data(struct web_client *w, char *url)
         goto cleanup;
     }
 
-    long long before = (before_str && *before_str)?atol(before_str):0;
-    long long after  = (after_str  && *after_str) ?atol(after_str):0;
-    int       points = (points_str && *points_str)?atoi(points_str):0;
+    long long before = (before_str && *before_str)?str2l(before_str):0;
+    long long after  = (after_str  && *after_str) ?str2l(after_str):0;
+    int       points = (points_str && *points_str)?str2i(points_str):0;
 
     debug(D_WEB_CLIENT, "%llu: API command 'data' for chart '%s', dimensions '%s', after '%lld', before '%lld', points '%d', group '%d', format '%u', options '0x%08x'"
             , w->id
@@ -1209,8 +1251,6 @@ cleanup:
 }
 
 
-#define REGISTRY_VERIFY_COOKIES_GUID "give-me-back-this-cookie-now--please"
-
 int web_client_api_request_v1_registry(struct web_client *w, char *url)
 {
     static uint32_t hash_action = 0, hash_access = 0, hash_hello = 0, hash_delete = 0, hash_search = 0,
@@ -1235,7 +1275,7 @@ int web_client_api_request_v1_registry(struct web_client *w, char *url)
 */
     }
 
-    char person_guid[36 + 1] = "";
+    char person_guid[GUID_LEN + 1] = "";
 
     debug(D_WEB_CLIENT, "%llu: API v1 registry with URL '%s'", w->id, url);
 
@@ -1350,60 +1390,6 @@ int web_client_api_request_v1_registry(struct web_client *w, char *url)
     switch(action) {
         case 'A':
             w->tracking_required = 1;
-            if(registry_verify_cookies_redirects() > 0 && (!cookie || !person_guid[0])) {
-                buffer_flush(w->response.data);
-                registry_set_cookie(w, REGISTRY_VERIFY_COOKIES_GUID);
-                w->response.data->contenttype = CT_APPLICATION_JSON;
-                buffer_sprintf(w->response.data, "{ \"status\": \"redirect\", \"registry\": \"%s\" }", registry_to_announce());
-                return 200;
-
-/*
- * it seems that web browsers are ignoring 307 (Moved Temporarily)
- * under certain conditions, when using CORS
- * so this is commented and we use application level redirects instead
- *
-                redirects++;
-
-                if(redirects > registry_verify_cookies_redirects()) {
-                    buffer_flush(w->response.data);
-                    buffer_sprintf(w->response.data, "Your browser does not support cookies");
-                    return 400;
-                }
-
-                char *encoded_url = url_encode(machine_url);
-                if(!encoded_url) {
-                    error("%llu: Cannot URL encode string '%s'", w->id, machine_url);
-                    return 500;
-                }
-
-                char *encoded_name = url_encode(url_name);
-                if(!encoded_name) {
-                    free(encoded_url);
-                    error("%llu: Cannot URL encode string '%s'", w->id, url_name);
-                    return 500;
-                }
-
-                char *encoded_guid = url_encode(machine_guid);
-                if(!encoded_guid) {
-                    free(encoded_url);
-                    free(encoded_name);
-                    error("%llu: Cannot URL encode string '%s'", w->id, machine_guid);
-                    return 500;
-                }
-
-                buffer_sprintf(w->response.header, "Location: %s/api/v1/registry?action=access&machine=%s&name=%s&url=%s&redirects=%d\r\n",
-                               registry_to_announce(), encoded_guid, encoded_name, encoded_url, redirects);
-
-                free(encoded_guid);
-                free(encoded_name);
-                free(encoded_url);
-                return 307
-*/
-            }
-
-            if(unlikely(cookie && person_guid[0] && !strcmp(person_guid, REGISTRY_VERIFY_COOKIES_GUID)))
-                person_guid[0] = '\0';
-
             return registry_request_access_json(w, person_guid, machine_guid, machine_url, url_name, now_realtime_sec());
 
         case 'D':
@@ -1429,7 +1415,7 @@ int web_client_api_request_v1_registry(struct web_client *w, char *url)
 }
 
 int web_client_api_request_v1(struct web_client *w, char *url) {
-    static uint32_t hash_data = 0, hash_chart = 0, hash_charts = 0, hash_registry = 0, hash_badge = 0, hash_alarms = 0, hash_alarm_log = 0, hash_alarm_variables = 0;
+    static uint32_t hash_data = 0, hash_chart = 0, hash_charts = 0, hash_registry = 0, hash_badge = 0, hash_alarms = 0, hash_alarm_log = 0, hash_alarm_variables = 0, hash_raw = 0;
 
     if(unlikely(hash_data == 0)) {
         hash_data = simple_hash("data");
@@ -1440,6 +1426,7 @@ int web_client_api_request_v1(struct web_client *w, char *url) {
         hash_alarms = simple_hash("alarms");
         hash_alarm_log = simple_hash("alarm_log");
         hash_alarm_variables = simple_hash("alarm_variables");
+        hash_raw = simple_hash("allmetrics");
     }
 
     // get the command
@@ -1471,6 +1458,9 @@ int web_client_api_request_v1(struct web_client *w, char *url) {
 
         else if(hash == hash_alarm_variables && !strcmp(tok, "alarm_variables"))
             return web_client_api_request_v1_alarm_variables(w, url);
+
+        else if(hash == hash_raw && !strcmp(tok, "allmetrics"))
+            return web_client_api_request_v1_allmetrics(w, url);
 
         else {
             buffer_flush(w->response.data);
@@ -1555,13 +1545,13 @@ int web_client_api_old_data_request(struct web_client *w, char *url, int datasou
     if(url) {
         // parse the lines required
         tok = mystrsep(&url, "/");
-        if(tok) lines = atoi(tok);
+        if(tok) lines = str2i(tok);
         if(lines < 1) lines = 1;
     }
     if(url) {
         // parse the group count required
         tok = mystrsep(&url, "/");
-        if(tok && *tok) group_count = atoi(tok);
+        if(tok && *tok) group_count = str2i(tok);
         if(group_count < 1) group_count = 1;
         //if(group_count > save_history / 20) group_count = save_history / 20;
     }
@@ -1578,13 +1568,13 @@ int web_client_api_old_data_request(struct web_client *w, char *url, int datasou
     if(url) {
         // parse after time
         tok = mystrsep(&url, "/");
-        if(tok && *tok) after = strtoul(tok, NULL, 10);
+        if(tok && *tok) after = str2ul(tok);
         if(after < 0) after = 0;
     }
     if(url) {
         // parse before time
         tok = mystrsep(&url, "/");
-        if(tok && *tok) before = strtoul(tok, NULL, 10);
+        if(tok && *tok) before = str2ul(tok);
         if(before < 0) before = 0;
     }
     if(url) {
@@ -1742,6 +1732,9 @@ const char *web_content_type_to_string(uint8_t contenttype) {
 
         case CT_IMAGE_ICNS:
             return "image/icns";
+
+        case CT_PROMETHEUS:
+            return "text/plain; version=0.0.4";
 
         default:
         case CT_TEXT_PLAIN:
@@ -2099,7 +2092,6 @@ void web_client_process(struct web_client *w) {
 
                     error("web request to exit received.");
                     netdata_cleanup_and_exit(0);
-                    netdata_exit = 1;
                 }
                 else if(hash == hash_debug && strcmp(tok, "debug") == 0) {
                     buffer_flush(w->response.data);
